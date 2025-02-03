@@ -1,0 +1,34 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.12.35707.178 d17.12
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DextopServer", "DextopServer\DextopServer.csproj", "{AD7091C7-F1C2-4BD9-A71B-A9CAB18E84C3}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DextopClient", "DextopClient\DextopClient.csproj", "{69B33BE1-9355-4CEE-8C5C-FC04F4DF8AF4}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DextopCommon", "DextopCommon\DextopCommon.csproj", "{1A0BDC45-858D-4A42-BAA3-029A77C5E0D3}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{AD7091C7-F1C2-4BD9-A71B-A9CAB18E84C3}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{AD7091C7-F1C2-4BD9-A71B-A9CAB18E84C3}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{AD7091C7-F1C2-4BD9-A71B-A9CAB18E84C3}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{AD7091C7-F1C2-4BD9-A71B-A9CAB18E84C3}.Release|Any CPU.Build.0 = Release|Any CPU
+		{69B33BE1-9355-4CEE-8C5C-FC04F4DF8AF4}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{69B33BE1-9355-4CEE-8C5C-FC04F4DF8AF4}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{69B33BE1-9355-4CEE-8C5C-FC04F4DF8AF4}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{69B33BE1-9355-4CEE-8C5C-FC04F4DF8AF4}.Release|Any CPU.Build.0 = Release|Any CPU
+		{1A0BDC45-858D-4A42-BAA3-029A77C5E0D3}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{1A0BDC45-858D-4A42-BAA3-029A77C5E0D3}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{1A0BDC45-858D-4A42-BAA3-029A77C5E0D3}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{1A0BDC45-858D-4A42-BAA3-029A77C5E0D3}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal
