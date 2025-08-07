@@ -1,5 +1,6 @@
-﻿using System.Net.Sockets;
+using System.Net.Sockets;
 using System.Net;
+using System.Buffers;
 
 namespace DextopServer.Services;
 
@@ -53,8 +54,16 @@ public class RemoteMonitorService : IDisposable
         {
             try
             {
-                byte[] buffer = BitConverter.GetBytes(monitorIndex);
-                await stream.WriteAsync(buffer.AsMemory(0, buffer.Length)).ConfigureAwait(false);
+                byte[] buffer = ArrayPool<byte>.Shared.Rent(4);
+                try
+                {
+                    BitConverter.GetBytes(monitorIndex).CopyTo(buffer, 0);
+                    await stream.WriteAsync(buffer.AsMemory(0, 4)).ConfigureAwait(false);
+                }
+                finally
+                {
+                    ArrayPool<byte>.Shared.Return(buffer);
+                }
             }
             catch
             {

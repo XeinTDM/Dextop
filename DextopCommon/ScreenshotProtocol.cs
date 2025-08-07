@@ -1,4 +1,6 @@
 using System.Net.Sockets;
+using System.Buffers;
+using System.Buffers.Binary;
 
 namespace DextopCommon;
 
@@ -6,29 +8,43 @@ public static class ScreenshotProtocol
 {
     public static async Task WriteInt32Async(NetworkStream stream, int value)
     {
-        byte[] bytes = BitConverter.GetBytes(value);
-        await stream.WriteAsync(bytes.AsMemory()).ConfigureAwait(false);
+        byte[] bytes = ArrayPool<byte>.Shared.Rent(4);
+        try
+        {
+            BinaryPrimitives.WriteInt32LittleEndian(bytes, value);
+            await stream.WriteAsync(bytes.AsMemory(0, 4)).ConfigureAwait(false);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(bytes);
+        }
     }
 
     public static async Task<int> ReadInt32Async(NetworkStream stream)
     {
-        byte[] bytes = new byte[4];
-        int totalRead = 0;
-        while (totalRead < 4)
+        byte[] bytes = ArrayPool<byte>.Shared.Rent(4);
+        try
         {
-            int read = await stream.ReadAsync(bytes.AsMemory(totalRead, 4 - totalRead)).ConfigureAwait(false);
-            if (read == 0)
+            int totalRead = 0;
+            while (totalRead < 4)
             {
-                throw new IOException("Disconnected");
+                int read = await stream.ReadAsync(bytes.AsMemory(totalRead, 4 - totalRead)).ConfigureAwait(false);
+                if (read == 0)
+                {
+                    throw new IOException("Disconnected");
+                }
+                totalRead += read;
             }
-            totalRead += read;
+            return BinaryPrimitives.ReadInt32LittleEndian(bytes);
         }
-        return BitConverter.ToInt32(bytes, 0);
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(bytes);
+        }
     }
 
     public static async Task WriteBytesAsync(NetworkStream stream, byte[] data)
     {
-        // Avoid allocating a new combined buffer; write header then payload
         await WriteInt32Async(stream, data.Length).ConfigureAwait(false);
         await stream.WriteAsync(data.AsMemory()).ConfigureAwait(false);
     }

@@ -18,12 +18,9 @@ public class RemoteDesktopManager : IDisposable
 
     private void OnScreenshotReceived(byte[] buffer)
     {
-        Task.Run(() =>
-        {
-            BitmapSource image = DecodeJpeg(buffer);
-            image.Freeze();
-            ScreenshotReceived?.Invoke(image);
-        });
+        BitmapSource image = DecodeJpeg(buffer);
+        image.Freeze();
+        ScreenshotReceived?.Invoke(image);
     }
 
     private static BitmapSource DecodeJpeg(byte[] buffer)

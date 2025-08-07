@@ -14,6 +14,10 @@
     <DebugType>portable</DebugType>
     <PublishSingleFile>false</PublishSingleFile>
     <Optimize>true</Optimize>
+    <ServerGarbageCollection>true</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+    <TrimMode>link</TrimMode>
+    <PublishTrimmed>false</PublishTrimmed>
   </PropertyGroup>
 
   <ItemGroup>
