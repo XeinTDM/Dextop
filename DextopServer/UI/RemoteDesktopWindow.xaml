@@ -1,4 +1,4 @@
-﻿<Window x:Class="DextopServer.UI.RemoteDesktopWindow"
+<Window x:Class="DextopServer.UI.RemoteDesktopWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Remote Desktop" Height="650" Width="1150"
@@ -32,7 +32,11 @@
             <Border Background="#2D2D30" CornerRadius="4,4,0,0" MouseLeftButtonDown="TitleBar_MouseLeftButtonDown">
                 <Grid>
                     <TextBlock Text="Dextop" Foreground="White" VerticalAlignment="Center" Margin="10,0,0,0"/>
-                    <TextBlock x:Name="fpsText" Text="FPS: N/A" Foreground="LimeGreen" VerticalAlignment="Center" HorizontalAlignment="Right" Margin="0,0,80,0"/>
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center" HorizontalAlignment="Right" Margin="0,0,80,0" >
+                        <TextBlock x:Name="fpsText" Text="FPS: N/A" Foreground="LimeGreen" Margin="0,0,12,0"/>
+                        <TextBlock x:Name="cpuText" Text="CPU: --%" Foreground="LightGray" Margin="0,0,12,0"/>
+                        <TextBlock x:Name="gpuText" Text="GPU: --%" Foreground="LightGray"/>
+                    </StackPanel>
                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,10,0">
                         <Button x:Name="MinimizeButton" Width="30" Height="30" Click="Minimize_Click" Background="Transparent" BorderBrush="Transparent" Cursor="Hand">
                             <Viewbox Stretch="Uniform">

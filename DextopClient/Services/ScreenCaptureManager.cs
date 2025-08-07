@@ -56,6 +56,13 @@ public class ScreenCaptureManager
             persistentGraphics.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighSpeed;
             persistentGraphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighSpeed;
             persistentGraphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.Low;
+            // Pre-size the JPEG buffer to reduce reallocations. JPEG typically compresses 3-10x;
+            // reserve up to 1 byte per pixel as a heuristic.
+            int estimatedCapacity = Math.Max(1024, screenBounds.Width * screenBounds.Height);
+            if (memoryStream.Capacity < estimatedCapacity)
+            {
+                memoryStream.Capacity = estimatedCapacity;
+            }
         }
     }
 
@@ -71,6 +78,11 @@ public class ScreenCaptureManager
             persistentGraphics.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighSpeed;
             persistentGraphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighSpeed;
             persistentGraphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.Low;
+            int estimatedCapacity = Math.Max(1024, screenBounds.Width * screenBounds.Height);
+            if (memoryStream.Capacity < estimatedCapacity)
+            {
+                memoryStream.Capacity = estimatedCapacity;
+            }
         }
     }
 

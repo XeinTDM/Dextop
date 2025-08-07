@@ -23,6 +23,7 @@ public partial class RemoteDesktopWindow : Window
     private bool mouseSupportActive;
     private Rect windowRect;
     private readonly RemoteMonitorService remoteMonitorService;
+    private readonly SystemMetricsService metricsService = new();
 
     public RemoteDesktopWindow()
     {
@@ -39,6 +40,17 @@ public partial class RemoteDesktopWindow : Window
         KeyboardSupportBtn.Checked += KeyboardSupportBtn_Checked;
         KeyboardSupportBtn.Unchecked += KeyboardSupportBtn_Unchecked;
         PopulateMonitorComboBox();
+
+        metricsService.MetricsUpdated += OnMetricsUpdated;
+    }
+
+    private void OnMetricsUpdated(double cpu, double gpu)
+    {
+        Dispatcher.BeginInvoke(() =>
+        {
+            cpuText.Text = $"CPU: {cpu:F0}%";
+            gpuText.Text = $"GPU: {gpu:F0}%";
+        });
     }
 
     private void PopulateMonitorComboBox()
@@ -204,6 +216,7 @@ public partial class RemoteDesktopWindow : Window
         remoteMouseService.Dispose();
         remoteKeyboardService.Dispose();
         remoteMonitorService.Dispose();
+        metricsService.Dispose();
         base.OnClosed(e);
     }
 }

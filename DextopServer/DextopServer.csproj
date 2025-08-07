@@ -16,10 +16,15 @@
     <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
     <TrimMode>link</TrimMode>
     <PublishTrimmed>false</PublishTrimmed>
+    <EnableDefaultItems>true</EnableDefaultItems>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\DextopCommon\DextopCommon.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Diagnostics.PerformanceCounter" Version="9.0.0" />
   </ItemGroup>
 
 </Project>
