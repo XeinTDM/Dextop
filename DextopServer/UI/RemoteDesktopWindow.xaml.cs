@@ -1,4 +1,4 @@
-﻿using System.Windows;
+using System.Windows;
 using System.Windows.Controls;
 using DextopServer.Configurations;
 using DextopServer.Services;
@@ -117,11 +117,11 @@ public partial class RemoteDesktopWindow : Window
 
     private async Task SendMouseEvent(System.Windows.Input.MouseEventArgs e, MouseEventType type)
     {
-        if (screenshotImage.Source is WriteableBitmap wb && screenshotImage.ActualWidth > 0 && screenshotImage.ActualHeight > 0)
+        if (screenshotImage.Source is BitmapSource bs && screenshotImage.ActualWidth > 0 && screenshotImage.ActualHeight > 0)
         {
             System.Windows.Point pos = e.GetPosition(screenshotImage);
-            int x = (int)(pos.X * wb.PixelWidth / screenshotImage.ActualWidth);
-            int y = (int)(pos.Y * wb.PixelHeight / screenshotImage.ActualHeight);
+            int x = (int)(pos.X * bs.PixelWidth / screenshotImage.ActualWidth);
+            int y = (int)(pos.Y * bs.PixelHeight / screenshotImage.ActualHeight);
             var data = new MouseEventData(type, x, y);
             await remoteMouseService.SendMouseEventAsync(data).ConfigureAwait(false);
         }

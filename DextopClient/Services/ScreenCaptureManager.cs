@@ -1,4 +1,4 @@
-﻿using System.Drawing;
+using System.Drawing;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
@@ -11,6 +11,7 @@ public class ScreenCaptureManager
 {
     private readonly MemoryStream memoryStream = new();
     private static ImageCodecInfo? jpegEncoder;
+    private EncoderParameters? encoderParams;
     private Bitmap? persistentScreenshot;
     private Graphics? persistentGraphics;
     private int currentQuality = 35;
@@ -25,6 +26,7 @@ public class ScreenCaptureManager
     public ScreenCaptureManager()
     {
         SelectedMonitorIndex = 0;
+        UpdateEncoderParams();
     }
 
     public int SelectedMonitorIndex
@@ -72,9 +74,8 @@ public class ScreenCaptureManager
         }
     }
 
-    public Bitmap CaptureScreen()
+    private void CaptureIntoPersistentBitmap()
     {
-        Bitmap result;
         lock (captureLock)
         {
             if (persistentScreenshot is null || persistentGraphics is null)
@@ -87,43 +88,53 @@ public class ScreenCaptureManager
             BitBlt(hdcDest, 0, 0, screenBounds.Width, screenBounds.Height, hdcDesktop, screenBounds.X, screenBounds.Y, 0x00CC0020);
             persistentGraphics.ReleaseHdc(hdcDest);
             desktopGraphics.ReleaseHdc(hdcDesktop);
-            result = (Bitmap)persistentScreenshot.Clone();
         }
-        return result;
-    }
-
-
-    public byte[] ConvertScreenshotToBytes(Bitmap screenshot, int quality)
-    {
-        memoryStream.SetLength(0);
-        jpegEncoder ??= GetJpegEncoder();
-        using var encoderParams = new EncoderParameters(1)
-        {
-            Param = { [0] = new EncoderParameter(Encoder.Quality, quality) }
-        };
-        screenshot.Save(memoryStream, jpegEncoder, encoderParams);
-        return memoryStream.ToArray();
     }
 
     private static ImageCodecInfo GetJpegEncoder() =>
         ImageCodecInfo.GetImageDecoders().First(codec => codec.FormatID == ImageFormat.Jpeg.Guid);
 
-    public async Task SendScreenshotAsync(NetworkStream stream, Bitmap screenshot, int quality)
+    private void UpdateEncoderParams()
     {
-        byte[] buffer = ConvertScreenshotToBytes(screenshot, quality);
-        await DextopCommon.ScreenshotProtocol.WriteBytesAsync(stream, buffer).ConfigureAwait(false);
+        encoderParams?.Dispose();
+        encoderParams = new EncoderParameters(1)
+        {
+            Param = { [0] = new EncoderParameter(Encoder.Quality, currentQuality) }
+        };
     }
 
-    public void UpdateQuality(int newQuality) => currentQuality = newQuality;
+    public void UpdateQuality(int newQuality)
+    {
+        if (currentQuality != newQuality)
+        {
+            currentQuality = newQuality;
+            UpdateEncoderParams();
+        }
+    }
+
+    public async Task SendScreenshotAsync(NetworkStream stream, Bitmap screenshot, int quality)
+    {
+        if (currentQuality != quality)
+        {
+            UpdateQuality(quality);
+        }
+        memoryStream.SetLength(0);
+        jpegEncoder ??= GetJpegEncoder();
+        screenshot.Save(memoryStream, jpegEncoder, encoderParams);
+        ReadOnlyMemory<byte> frame = new ReadOnlyMemory<byte>(memoryStream.GetBuffer(), 0, (int)memoryStream.Length);
+        await DextopCommon.ScreenshotProtocol.WriteBytesAsync(stream, frame).ConfigureAwait(false);
+    }
 
     public async Task CaptureAndSendScreenshot(NetworkStream stream)
     {
         try
         {
-            Bitmap screenshot = CaptureScreen();
-            byte[] buffer = await Task.Run(() => ConvertScreenshotToBytes(screenshot, currentQuality))
-                                     .ConfigureAwait(false);
-            await DextopCommon.ScreenshotProtocol.WriteBytesAsync(stream, buffer).ConfigureAwait(false);
+            CaptureIntoPersistentBitmap();
+            memoryStream.SetLength(0);
+            jpegEncoder ??= GetJpegEncoder();
+            persistentScreenshot!.Save(memoryStream, jpegEncoder, encoderParams);
+            ReadOnlyMemory<byte> frame = new ReadOnlyMemory<byte>(memoryStream.GetBuffer(), 0, (int)memoryStream.Length);
+            await DextopCommon.ScreenshotProtocol.WriteBytesAsync(stream, frame).ConfigureAwait(false);
         }
         catch (Exception ex)
         {

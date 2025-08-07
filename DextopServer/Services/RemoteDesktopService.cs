@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Net.Sockets;
 using System.Net;
 
@@ -8,7 +8,6 @@ public class RemoteDesktopService : IDisposable
 {
     private readonly CancellationTokenSource cancellationTokenSource;
     private readonly Action<byte[]> onScreenshotReceived;
-    private const int TargetFrameDelay = 33;
     private readonly TcpListener server;
     private NetworkStream? stream;
     private TcpClient? client;
@@ -66,7 +65,6 @@ public class RemoteDesktopService : IDisposable
                 break;
             }
 
-            var frameStopwatch = Stopwatch.StartNew();
             try
             {
                 byte[] imageData = await DextopCommon.ScreenshotProtocol.ReadBytesAsync(stream).ConfigureAwait(false);
@@ -76,20 +74,6 @@ public class RemoteDesktopService : IDisposable
             {
                 HandleClientDisconnection();
                 break;
-            }
-
-            var delay = TargetFrameDelay - (int)frameStopwatch.ElapsedMilliseconds;
-            if (delay > 0)
-            {
-                try
-                {
-                    await Task.Delay(delay, cancellationTokenSource.Token)
-                              .ConfigureAwait(false);
-                }
-                catch (TaskCanceledException)
-                {
-                    break;
-                }
             }
         }
     }

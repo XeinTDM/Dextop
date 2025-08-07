@@ -1,4 +1,4 @@
-﻿using System.Windows.Media.Imaging;
+using System.Windows.Media.Imaging;
 using DextopServer.Configurations;
 using System.IO;
 
@@ -9,7 +9,7 @@ public class RemoteDesktopManager : IDisposable
     private readonly RemoteDesktopService rdService;
     private bool disposed;
 
-    public event Action<WriteableBitmap>? ScreenshotReceived;
+    public event Action<BitmapSource>? ScreenshotReceived;
 
     public RemoteDesktopManager(AppConfiguration config)
     {
@@ -18,22 +18,16 @@ public class RemoteDesktopManager : IDisposable
 
     private void OnScreenshotReceived(byte[] buffer)
     {
-        Task.Run(() =>
-        {
-            WriteableBitmap image = ConvertToWriteableBitmap(buffer);
-            image.Freeze();
-            ScreenshotReceived?.Invoke(image);
-        });
+        BitmapSource image = DecodeJpeg(buffer);
+        image.Freeze();
+        ScreenshotReceived?.Invoke(image);
     }
 
-    private static WriteableBitmap ConvertToWriteableBitmap(byte[] buffer)
+    private static BitmapSource DecodeJpeg(byte[] buffer)
     {
         using var ms = new MemoryStream(buffer);
         var decoder = new JpegBitmapDecoder(ms, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
-        var frame = decoder.Frames[0];
-        var wb = new WriteableBitmap(frame);
-        wb.Freeze();
-        return wb;
+        return decoder.Frames[0];
     }
 
     public void UpdateQuality(int newQuality) => rdService.UpdateQuality(newQuality);

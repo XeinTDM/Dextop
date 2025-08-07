@@ -1,4 +1,5 @@
-﻿using System.Net.Sockets;
+using System.Net.Sockets;
+using System.Buffers;
 
 namespace DextopClient.Services;
 
@@ -23,17 +24,24 @@ public class RemoteMonitorHandler : IDisposable
                 stream = client.GetStream();
                 while (client.Connected && !cancellationTokenSource.IsCancellationRequested)
                 {
-                    byte[] buffer = new byte[4];
-                    int totalRead = 0;
-                    while (totalRead < 4)
+                    byte[] buffer = ArrayPool<byte>.Shared.Rent(4);
+                    try
                     {
-                        int read = await stream.ReadAsync(buffer.AsMemory(totalRead, 4 - totalRead), cancellationTokenSource.Token)
-                                               .ConfigureAwait(false);
-                        if (read == 0) throw new IOException("Disconnected");
-                        totalRead += read;
+                        int totalRead = 0;
+                        while (totalRead < 4)
+                        {
+                            int read = await stream.ReadAsync(buffer.AsMemory(totalRead, 4 - totalRead), cancellationTokenSource.Token)
+                                                   .ConfigureAwait(false);
+                            if (read == 0) throw new IOException("Disconnected");
+                            totalRead += read;
+                        }
+                        int monitorIndex = BitConverter.ToInt32(buffer);
+                        onMonitorSelected(monitorIndex);
                     }
-                    int monitorIndex = BitConverter.ToInt32(buffer);
-                    onMonitorSelected(monitorIndex);
+                    finally
+                    {
+                        ArrayPool<byte>.Shared.Return(buffer);
+                    }
                 }
             }
             catch (Exception ex)

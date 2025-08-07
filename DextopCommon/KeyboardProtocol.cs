@@ -1,4 +1,6 @@
-﻿using System.Net.Sockets;
+using System.Net.Sockets;
+using System.Buffers;
+using System.Buffers.Binary;
 
 namespace DextopCommon;
 
@@ -14,25 +16,39 @@ public static class KeyboardProtocol
 {
     public static async Task WriteKeyboardEventAsync(NetworkStream stream, KeyboardEventData data)
     {
-        byte[] buffer = new byte[5];
-        buffer[0] = (byte)data.EventType;
-        BitConverter.GetBytes(data.VirtualKeyCode).CopyTo(buffer, 1);
-        await stream.WriteAsync(buffer.AsMemory(0, buffer.Length)).ConfigureAwait(false);
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(5);
+        try
+        {
+            buffer[0] = (byte)data.EventType;
+            BinaryPrimitives.WriteInt32LittleEndian(buffer.AsSpan(1, 4), data.VirtualKeyCode);
+            await stream.WriteAsync(buffer.AsMemory(0, 5)).ConfigureAwait(false);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
     }
 
     public static async Task<KeyboardEventData> ReadKeyboardEventAsync(NetworkStream stream)
     {
-        byte[] buffer = new byte[5];
-        int totalRead = 0;
-        while (totalRead < 5)
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(5);
+        try
         {
-            int read = await stream.ReadAsync(buffer.AsMemory(totalRead, 5 - totalRead)).ConfigureAwait(false);
-            if (read == 0)
-                throw new IOException("Disconnected");
-            totalRead += read;
+            int totalRead = 0;
+            while (totalRead < 5)
+            {
+                int read = await stream.ReadAsync(buffer.AsMemory(totalRead, 5 - totalRead)).ConfigureAwait(false);
+                if (read == 0)
+                    throw new IOException("Disconnected");
+                totalRead += read;
+            }
+            KeyboardEventType type = (KeyboardEventType)buffer[0];
+            int vk = BinaryPrimitives.ReadInt32LittleEndian(buffer.AsSpan(1, 4));
+            return new KeyboardEventData(type, vk);
         }
-        KeyboardEventType type = (KeyboardEventType)buffer[0];
-        int vk = BitConverter.ToInt32(buffer, 1);
-        return new KeyboardEventData(type, vk);
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
     }
 }
