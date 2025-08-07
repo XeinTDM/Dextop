@@ -1,4 +1,4 @@
-﻿using System.Windows.Media.Imaging;
+using System.Windows.Media.Imaging;
 using DextopServer.Configurations;
 using System.Windows.Controls;
 
@@ -20,7 +20,7 @@ public class RemoteDesktopReceiver
         rdManager.ScreenshotReceived += OnScreenshotReceived;
     }
 
-    private void OnScreenshotReceived(WriteableBitmap image)
+    private void OnScreenshotReceived(BitmapSource image)
     {
         screenshotImageControl.Dispatcher.BeginInvoke(() =>
         {

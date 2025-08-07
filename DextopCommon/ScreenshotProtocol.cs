@@ -1,4 +1,4 @@
-﻿using System.Net.Sockets;
+using System.Net.Sockets;
 
 namespace DextopCommon;
 
@@ -28,11 +28,15 @@ public static class ScreenshotProtocol
 
     public static async Task WriteBytesAsync(NetworkStream stream, byte[] data)
     {
-        int length = data.Length;
-        byte[] combined = new byte[4 + length];
-        BitConverter.GetBytes(length).CopyTo(combined, 0);
-        data.CopyTo(combined, 4);
-        await stream.WriteAsync(combined.AsMemory()).ConfigureAwait(false);
+        // Avoid allocating a new combined buffer; write header then payload
+        await WriteInt32Async(stream, data.Length).ConfigureAwait(false);
+        await stream.WriteAsync(data.AsMemory()).ConfigureAwait(false);
+    }
+
+    public static async Task WriteBytesAsync(NetworkStream stream, ReadOnlyMemory<byte> data)
+    {
+        await WriteInt32Async(stream, data.Length).ConfigureAwait(false);
+        await stream.WriteAsync(data).ConfigureAwait(false);
     }
 
     public static async Task<byte[]> ReadBytesAsync(NetworkStream stream)

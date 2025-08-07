@@ -1,4 +1,5 @@
-﻿using System.Net.Sockets;
+using System.Net.Sockets;
+using System.Buffers;
 
 namespace DextopCommon;
 
@@ -17,11 +18,18 @@ public static class MouseProtocol
 {
     public static async Task WriteMouseEventAsync(NetworkStream stream, MouseEventData data)
     {
-        byte[] buffer = new byte[9];
-        buffer[0] = (byte)data.EventType;
-        BitConverter.GetBytes(data.X).CopyTo(buffer, 1);
-        BitConverter.GetBytes(data.Y).CopyTo(buffer, 5);
-        await stream.WriteAsync(buffer.AsMemory(0, buffer.Length)).ConfigureAwait(false);
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(9);
+        try
+        {
+            buffer[0] = (byte)data.EventType;
+            BitConverter.GetBytes(data.X).CopyTo(buffer, 1);
+            BitConverter.GetBytes(data.Y).CopyTo(buffer, 5);
+            await stream.WriteAsync(buffer.AsMemory(0, 9)).ConfigureAwait(false);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
     }
 
     public static async Task<MouseEventData> ReadMouseEventAsync(NetworkStream stream)

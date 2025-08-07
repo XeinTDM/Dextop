@@ -1,4 +1,4 @@
-﻿using System.Drawing;
+using System.Drawing;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
@@ -72,9 +72,8 @@ public class ScreenCaptureManager
         }
     }
 
-    public Bitmap CaptureScreen()
+    private void CaptureIntoPersistentBitmap()
     {
-        Bitmap result;
         lock (captureLock)
         {
             if (persistentScreenshot is null || persistentGraphics is null)
@@ -87,11 +86,8 @@ public class ScreenCaptureManager
             BitBlt(hdcDest, 0, 0, screenBounds.Width, screenBounds.Height, hdcDesktop, screenBounds.X, screenBounds.Y, 0x00CC0020);
             persistentGraphics.ReleaseHdc(hdcDest);
             desktopGraphics.ReleaseHdc(hdcDesktop);
-            result = (Bitmap)persistentScreenshot.Clone();
         }
-        return result;
     }
-
 
     public byte[] ConvertScreenshotToBytes(Bitmap screenshot, int quality)
     {
@@ -120,10 +116,17 @@ public class ScreenCaptureManager
     {
         try
         {
-            Bitmap screenshot = CaptureScreen();
-            byte[] buffer = await Task.Run(() => ConvertScreenshotToBytes(screenshot, currentQuality))
-                                     .ConfigureAwait(false);
-            await DextopCommon.ScreenshotProtocol.WriteBytesAsync(stream, buffer).ConfigureAwait(false);
+            CaptureIntoPersistentBitmap();
+            // Encode directly from the persistent bitmap to avoid per-frame clone
+            memoryStream.SetLength(0);
+            jpegEncoder ??= GetJpegEncoder();
+            using var encoderParams = new EncoderParameters(1)
+            {
+                Param = { [0] = new EncoderParameter(Encoder.Quality, currentQuality) }
+            };
+            persistentScreenshot!.Save(memoryStream, jpegEncoder, encoderParams);
+            ReadOnlyMemory<byte> frame = new ReadOnlyMemory<byte>(memoryStream.GetBuffer(), 0, (int)memoryStream.Length);
+            await DextopCommon.ScreenshotProtocol.WriteBytesAsync(stream, frame).ConfigureAwait(false);
         }
         catch (Exception ex)
         {

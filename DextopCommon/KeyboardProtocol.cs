@@ -1,4 +1,4 @@
-﻿using System.Net.Sockets;
+using System.Net.Sockets;
 
 namespace DextopCommon;
 
@@ -14,10 +14,10 @@ public static class KeyboardProtocol
 {
     public static async Task WriteKeyboardEventAsync(NetworkStream stream, KeyboardEventData data)
     {
-        byte[] buffer = new byte[5];
+        Span<byte> buffer = stackalloc byte[5];
         buffer[0] = (byte)data.EventType;
-        BitConverter.GetBytes(data.VirtualKeyCode).CopyTo(buffer, 1);
-        await stream.WriteAsync(buffer.AsMemory(0, buffer.Length)).ConfigureAwait(false);
+        BitConverter.GetBytes(data.VirtualKeyCode).CopyTo(buffer[1..]);
+        await stream.WriteAsync(buffer.ToArray().AsMemory()).ConfigureAwait(false);
     }
 
     public static async Task<KeyboardEventData> ReadKeyboardEventAsync(NetworkStream stream)
