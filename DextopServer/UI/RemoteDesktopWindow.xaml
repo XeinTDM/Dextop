@@ -1,4 +1,4 @@
-﻿<Window x:Class="DextopServer.UI.RemoteDesktopWindow"
+<Window x:Class="DextopServer.UI.RemoteDesktopWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Remote Desktop" Height="650" Width="1150"
@@ -107,10 +107,19 @@
 
                 <Grid Grid.Column="1" Grid.Row="1" Background="Black">
                     <Image x:Name="screenshotImage" Stretch="Uniform" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"/>
+                    <Border x:Name="metricsOverlay" Background="#2A2A2A" BorderBrush="#555" BorderThickness="1" 
+                            CornerRadius="4" Margin="10" Padding="8" HorizontalAlignment="Left" VerticalAlignment="Top" 
+                            MaxWidth="350" Visibility="Hidden">
+                        <StackPanel>
+                            <TextBlock Text="Performance Metrics" Foreground="White" FontWeight="Bold" FontSize="12" Margin="0,0,0,5"/>
+                            <TextBlock x:Name="metricsText" Foreground="LimeGreen" FontSize="10" FontFamily="Courier New" 
+                                       TextWrapping="Wrap" LineHeight="14"/>
+                        </StackPanel>
+                    </Border>
                 </Grid>
 
                 <Grid Grid.Column="1" Grid.Row="3" Background="#1E1E1E">
-                    <TextBlock Text="Press F11 for full-screen toggle" Foreground="Gray" VerticalAlignment="Center" HorizontalAlignment="Center"/>
+                    <TextBlock Text="Press F11 for full-screen toggle, F12 for metrics, F10 to record" Foreground="Gray" VerticalAlignment="Center" HorizontalAlignment="Center"/>
                 </Grid>
             </Grid>
         </Grid>

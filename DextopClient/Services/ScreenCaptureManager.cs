@@ -4,6 +4,8 @@ using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using System.IO;
 using System.Net.Sockets;
+using System.Diagnostics;
+using DextopCommon;
 
 namespace DextopClient.Services;
 
@@ -18,6 +20,7 @@ public class ScreenCaptureManager
     private Rectangle screenBounds;
     private int selectedMonitorIndex;
     private readonly object captureLock = new();
+    private readonly MetricsCollector metricsCollector = new();
 
     [DllImport("gdi32.dll")]
     private static extern bool BitBlt(IntPtr hdcDest, int nXDest, int nYDest, int nWidth, int nHeight,
@@ -28,6 +31,8 @@ public class ScreenCaptureManager
         SelectedMonitorIndex = 0;
         UpdateEncoderParams();
     }
+
+    public MetricsCollector MetricsCollector => metricsCollector;
 
     public int SelectedMonitorIndex
     {
@@ -129,12 +134,24 @@ public class ScreenCaptureManager
     {
         try
         {
+            Stopwatch captureStopwatch = Stopwatch.StartNew();
             CaptureIntoPersistentBitmap();
+            captureStopwatch.Stop();
+            metricsCollector.RecordCaptureTime(captureStopwatch.ElapsedMilliseconds);
+
             memoryStream.SetLength(0);
             jpegEncoder ??= GetJpegEncoder();
+
+            Stopwatch encodeStopwatch = Stopwatch.StartNew();
             persistentScreenshot!.Save(memoryStream, jpegEncoder, encoderParams);
+            encodeStopwatch.Stop();
+            metricsCollector.RecordEncodeTime(encodeStopwatch.ElapsedMilliseconds);
+
             ReadOnlyMemory<byte> frame = new ReadOnlyMemory<byte>(memoryStream.GetBuffer(), 0, (int)memoryStream.Length);
+            metricsCollector.RecordBytesSent(frame.Length);
             await DextopCommon.ScreenshotProtocol.WriteBytesAsync(stream, frame).ConfigureAwait(false);
+
+            metricsCollector.UpdateCpuAndMemory();
         }
         catch (Exception ex)
         {

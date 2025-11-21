@@ -1,6 +1,7 @@
 using System.Windows.Media.Imaging;
 using DextopServer.Configurations;
 using System.Windows.Controls;
+using DextopCommon;
 
 namespace DextopServer.Services;
 
@@ -16,7 +17,7 @@ public class RemoteDesktopReceiver
         this.screenshotImageControl = screenshotImageControl;
         this.fpsTextControl = fpsTextControl;
         this.rdUIManager = rdUIManager;
-        rdManager = new RemoteDesktopManager(config);
+        rdManager = new RemoteDesktopManager(config, rdUIManager);
         rdManager.ScreenshotReceived += OnScreenshotReceived;
     }
 
@@ -34,6 +35,8 @@ public class RemoteDesktopReceiver
     }
 
     public void UpdateQuality(int newQuality) => rdManager.UpdateQuality(newQuality);
+
+    public MetricsCollector GetMetricsCollector() => rdUIManager.MetricsCollector;
 
     public void Dispose() => rdManager.Dispose();
 }
