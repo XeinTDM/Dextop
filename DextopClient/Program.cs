@@ -1,4 +1,4 @@
-﻿using DextopClient.Services;
+using DextopClient.Services;
 using System.Diagnostics;
 using System.Net.Sockets;
 
@@ -24,6 +24,7 @@ class Program
             while (true)
                 Task.Delay(1000).Wait();
         });
+        _ = Task.Run(() => MetricsLoggingLoop());
         using RemoteMonitorHandler monitorHandler = new(monitorIndex => screenCaptureManager.SelectedMonitorIndex = monitorIndex);
         while (true)
         {
@@ -33,6 +34,8 @@ class Program
             {
                 client = new TcpClient(ServerAddress, ServerPort) { NoDelay = true };
                 stream = client.GetStream();
+                int frameCount = 0;
+                Stopwatch fpsStopwatch = Stopwatch.StartNew();
                 while (client.Connected)
                 {
                     Stopwatch frameStopwatch = Stopwatch.StartNew();
@@ -40,6 +43,15 @@ class Program
                     int elapsed = (int)frameStopwatch.ElapsedMilliseconds;
                     int delay = Math.Max(0, 33 - elapsed);
                     await Task.Delay(delay).ConfigureAwait(false);
+
+                    frameCount++;
+                    if (fpsStopwatch.Elapsed.TotalSeconds >= 1.0)
+                    {
+                        double fps = frameCount / fpsStopwatch.Elapsed.TotalSeconds;
+                        screenCaptureManager.MetricsCollector.RecordClientFps(fps);
+                        frameCount = 0;
+                        fpsStopwatch.Restart();
+                    }
                 }
             }
             catch (Exception ex)
@@ -52,6 +64,19 @@ class Program
                 client?.Close();
             }
             await Task.Delay(5000).ConfigureAwait(false);
+        }
+    }
+
+    static async Task MetricsLoggingLoop()
+    {
+        while (true)
+        {
+            await Task.Delay(2000).ConfigureAwait(false);
+            var snapshot = screenCaptureManager.MetricsCollector.Metrics.GetSnapshot();
+            if (snapshot.ClientFps > 0)
+            {
+                Console.WriteLine(snapshot);
+            }
         }
     }
 }
