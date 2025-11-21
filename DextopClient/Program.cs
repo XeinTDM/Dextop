@@ -32,29 +32,15 @@ class Program
         {
             TcpClient? client = null;
             NetworkStream? stream = null;
+            CancellationTokenSource? cts = null;
             try
             {
                 client = new TcpClient(ServerAddress, ServerPort) { NoDelay = true };
                 stream = client.GetStream();
-                int frameCount = 0;
-                Stopwatch fpsStopwatch = Stopwatch.StartNew();
-                while (client.Connected)
-                {
-                    Stopwatch frameStopwatch = Stopwatch.StartNew();
-                    await screenCaptureManager.CaptureAndSendScreenshot(stream).ConfigureAwait(false);
-                    int elapsed = (int)frameStopwatch.ElapsedMilliseconds;
-                    int delay = Math.Max(0, 33 - elapsed);
-                    await Task.Delay(delay).ConfigureAwait(false);
-
-                    frameCount++;
-                    if (fpsStopwatch.Elapsed.TotalSeconds >= 1.0)
-                    {
-                        double fps = frameCount / fpsStopwatch.Elapsed.TotalSeconds;
-                        screenCaptureManager.MetricsCollector.RecordClientFps(fps);
-                        frameCount = 0;
-                        fpsStopwatch.Restart();
-                    }
-                }
+                cts = new CancellationTokenSource();
+                
+                // Use the new async capture pipeline targeting 60 FPS
+                await screenCaptureManager.StartStreamingAsync(stream, cts.Token, targetFps: 60).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -62,6 +48,8 @@ class Program
             }
             finally
             {
+                cts?.Cancel();
+                cts?.Dispose();
                 stream?.Dispose();
                 client?.Close();
             }

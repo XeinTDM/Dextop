@@ -5,6 +5,8 @@ using System.Windows.Forms;
 using System.IO;
 using System.Net.Sockets;
 using System.Diagnostics;
+using System.Threading;
+using System.Threading.Channels;
 using DextopCommon;
 using TurboJpegWrapper;
 
@@ -29,6 +31,24 @@ public class ScreenCaptureManager : IDisposable
     private TJCompressor? tjCompressor;
     private readonly bool useTurboJpeg;
     private bool turboJpegAvailable;
+
+    // Double-buffered capture pipeline
+    private Bitmap? captureBuffer1;
+    private Bitmap? captureBuffer2;
+    private Graphics? captureGraphics1;
+    private Graphics? captureGraphics2;
+    private Bitmap? currentCaptureBuffer;
+    private Graphics? currentCaptureGraphics;
+    
+    // Desktop context caching for efficient BitBlt
+    private Graphics? desktopGraphics;
+    private IntPtr cachedDesktopHdc = IntPtr.Zero;
+    
+    private struct CapturedFrame
+    {
+        public Bitmap Bitmap;
+        public long CaptureTimeMs;
+    }
 
     [DllImport("gdi32.dll")]
     private static extern bool BitBlt(IntPtr hdcDest, int nXDest, int nYDest, int nWidth, int nHeight,
@@ -114,6 +134,26 @@ public class ScreenCaptureManager : IDisposable
         }
     }
 
+    private void CacheDesktopGraphics()
+    {
+        if (desktopGraphics == null)
+        {
+            desktopGraphics = Graphics.FromHwnd(IntPtr.Zero);
+            cachedDesktopHdc = desktopGraphics.GetHdc();
+        }
+    }
+
+    private void ReleaseCachedDesktopGraphics()
+    {
+        if (desktopGraphics != null)
+        {
+            desktopGraphics.ReleaseHdc(cachedDesktopHdc);
+            desktopGraphics.Dispose();
+            desktopGraphics = null;
+            cachedDesktopHdc = IntPtr.Zero;
+        }
+    }
+
     private void CaptureIntoPersistentBitmap()
     {
         lock (captureLock)
@@ -122,12 +162,22 @@ public class ScreenCaptureManager : IDisposable
             {
                 InitializeCaptureObjects();
             }
-            using Graphics desktopGraphics = Graphics.FromHwnd(IntPtr.Zero);
-            IntPtr hdcDesktop = desktopGraphics.GetHdc();
+            
+            CacheDesktopGraphics();
             IntPtr hdcDest = persistentGraphics!.GetHdc();
-            BitBlt(hdcDest, 0, 0, screenBounds.Width, screenBounds.Height, hdcDesktop, screenBounds.X, screenBounds.Y, 0x00CC0020);
+            BitBlt(hdcDest, 0, 0, screenBounds.Width, screenBounds.Height, cachedDesktopHdc, screenBounds.X, screenBounds.Y, 0x00CC0020);
             persistentGraphics.ReleaseHdc(hdcDest);
-            desktopGraphics.ReleaseHdc(hdcDesktop);
+        }
+    }
+
+    private void CaptureIntoCachedBuffer(Bitmap targetBuffer, Graphics targetGraphics)
+    {
+        lock (captureLock)
+        {
+            CacheDesktopGraphics();
+            IntPtr hdcDest = targetGraphics.GetHdc();
+            BitBlt(hdcDest, 0, 0, screenBounds.Width, screenBounds.Height, cachedDesktopHdc, screenBounds.X, screenBounds.Y, 0x00CC0020);
+            targetGraphics.ReleaseHdc(hdcDest);
         }
     }
 
@@ -231,6 +281,258 @@ public class ScreenCaptureManager : IDisposable
         await DextopCommon.ScreenshotProtocol.WriteBytesAsync(stream, frame).ConfigureAwait(false);
     }
 
+    public async Task StartStreamingAsync(NetworkStream stream, CancellationToken ct, int targetFps = 60)
+    {
+        InitializeDoubleCaptureBuffers();
+        
+        try
+        {
+            var frameChannel = Channel.CreateBounded<CapturedFrame>(new BoundedChannelOptions(3) 
+            { 
+                FullMode = BoundedChannelFullMode.DropOldest 
+            });
+
+            // Start capture thread
+            var captureTask = Task.Run(() => CaptureLoopThread(frameChannel.Writer, ct, targetFps), ct);
+            
+            // Start encode/send thread
+            var encodeTask = Task.Run(() => EncodeAndSendLoopThread(stream, frameChannel.Reader, ct), ct);
+
+            await Task.WhenAny(captureTask, encodeTask).ConfigureAwait(false);
+        }
+        finally
+        {
+            ReleaseDoubleCaptureBuffers();
+            ReleaseCachedDesktopGraphics();
+        }
+    }
+
+    private void InitializeDoubleCaptureBuffers()
+    {
+        lock (captureLock)
+        {
+            var screen = Screen.AllScreens[selectedMonitorIndex];
+            screenBounds = screen.Bounds;
+
+            // Initialize two alternating capture buffers
+            captureBuffer1 = new Bitmap(screenBounds.Width, screenBounds.Height, PixelFormat.Format32bppArgb);
+            captureGraphics1 = Graphics.FromImage(captureBuffer1);
+            captureGraphics1.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
+            captureGraphics1.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighSpeed;
+            captureGraphics1.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighSpeed;
+            captureGraphics1.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.Low;
+
+            captureBuffer2 = new Bitmap(screenBounds.Width, screenBounds.Height, PixelFormat.Format32bppArgb);
+            captureGraphics2 = Graphics.FromImage(captureBuffer2);
+            captureGraphics2.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
+            captureGraphics2.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighSpeed;
+            captureGraphics2.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighSpeed;
+            captureGraphics2.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.Low;
+
+            currentCaptureBuffer = captureBuffer1;
+            currentCaptureGraphics = captureGraphics1;
+        }
+    }
+
+    private void ReleaseDoubleCaptureBuffers()
+    {
+        lock (captureLock)
+        {
+            captureGraphics1?.Dispose();
+            captureBuffer1?.Dispose();
+            captureGraphics2?.Dispose();
+            captureBuffer2?.Dispose();
+            currentCaptureBuffer = null;
+            currentCaptureGraphics = null;
+        }
+    }
+
+    private void CaptureLoopThread(ChannelWriter<CapturedFrame> writer, CancellationToken ct, int targetFps)
+    {
+        const long ticksPerFrame = 10_000_000 / 60; // 166ms in 100ns ticks for 60 FPS
+        long nextFrameTime = Stopwatch.GetTimestamp();
+
+        try
+        {
+            CacheDesktopGraphics();
+
+            while (!ct.IsCancellationRequested)
+            {
+                long now = Stopwatch.GetTimestamp();
+                long ticksUntilNextFrame = nextFrameTime - now;
+
+                if (ticksUntilNextFrame > 0)
+                {
+                    int msDelay = (int)(ticksUntilNextFrame / 10000); // Convert 100ns ticks to ms
+                    if (msDelay > 0)
+                    {
+                        ct.WaitHandle.WaitOne(msDelay);
+                    }
+                }
+
+                // Perform capture
+                Stopwatch captureStopwatch = Stopwatch.StartNew();
+                Bitmap bufferToFill;
+                Graphics graphicsToUse;
+
+                lock (captureLock)
+                {
+                    // Alternate between buffers
+                    if (currentCaptureBuffer == captureBuffer1)
+                    {
+                        bufferToFill = captureBuffer2!;
+                        graphicsToUse = captureGraphics2!;
+                        currentCaptureBuffer = captureBuffer2;
+                        currentCaptureGraphics = captureGraphics2;
+                    }
+                    else
+                    {
+                        bufferToFill = captureBuffer1!;
+                        graphicsToUse = captureGraphics1!;
+                        currentCaptureBuffer = captureBuffer1;
+                        currentCaptureGraphics = captureGraphics1;
+                    }
+                }
+
+                CaptureIntoCachedBuffer(bufferToFill, graphicsToUse);
+                captureStopwatch.Stop();
+                metricsCollector.RecordCaptureTime(captureStopwatch.ElapsedMilliseconds);
+
+                var frame = new CapturedFrame 
+                { 
+                    Bitmap = bufferToFill,
+                    CaptureTimeMs = captureStopwatch.ElapsedMilliseconds
+                };
+
+                if (!writer.TryWrite(frame))
+                {
+                    metricsCollector.RecordDroppedFrame();
+                }
+
+                nextFrameTime += ticksPerFrame;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected on cancellation
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error in capture loop: {ex.Message}");
+        }
+        finally
+        {
+            writer.TryComplete();
+        }
+    }
+
+    private async Task EncodeAndSendLoopThread(NetworkStream stream, ChannelReader<CapturedFrame> reader, CancellationToken ct)
+    {
+        int frameCount = 0;
+        Stopwatch fpsStopwatch = Stopwatch.StartNew();
+
+        try
+        {
+            await foreach (var frame in reader.ReadAllAsync(ct))
+            {
+                try
+                {
+                    // Get scaled bitmap based on adaptive controller
+                    Bitmap bitmapToSend = GetScaledBitmap();
+                    int actualQuality = adaptiveController.CurrentQuality;
+
+                    // Update encoder if quality changed
+                    if (currentQuality != actualQuality)
+                    {
+                        UpdateQuality(actualQuality);
+                    }
+
+                    byte[] frameData;
+                    Stopwatch encodeStopwatch = Stopwatch.StartNew();
+                    
+                    if (turboJpegAvailable && tjCompressor != null)
+                    {
+                        // Use TurboJPEG SIMD-accelerated encoding
+                        frameData = EncodeBitmapWithTurboJpeg(bitmapToSend, actualQuality);
+                    }
+                    else
+                    {
+                        // Fallback to managed encoder
+                        memoryStream.SetLength(0);
+                        jpegEncoder ??= GetJpegEncoder();
+                        bitmapToSend.Save(memoryStream, jpegEncoder, encoderParams);
+                        frameData = memoryStream.GetBuffer()[0..(int)memoryStream.Length];
+                    }
+                    
+                    encodeStopwatch.Stop();
+                    metricsCollector.RecordEncodeTime(encodeStopwatch.ElapsedMilliseconds);
+
+                    ReadOnlyMemory<byte> frameMemory = new ReadOnlyMemory<byte>(frameData);
+                    
+                    // Compute hash for duplicate detection
+                    byte[] frameHash = ScreenshotProtocol.ComputeFrameHash(frameMemory);
+                    
+                    // Check if we should drop this frame (duplicate)
+                    if (adaptiveController.ShouldDropFrame(frameHash))
+                    {
+                        frameCount++;
+                        continue;
+                    }
+
+                    // Create frame metadata
+                    var metadata = new ScreenshotProtocol.FrameMetadata(
+                        sequenceId: adaptiveController.NextSequenceId,
+                        timestamp: DateTime.UtcNow.Ticks,
+                        width: (ushort)bitmapToSend.Width,
+                        height: (ushort)bitmapToSend.Height,
+                        quality: (byte)actualQuality,
+                        hash: frameHash
+                    );
+
+                    Stopwatch sendStopwatch = Stopwatch.StartNew();
+                    await ScreenshotProtocol.WriteFrameWithMetadataAsync(stream, metadata, frameMemory).ConfigureAwait(false);
+                    sendStopwatch.Stop();
+
+                    // Record metrics
+                    metricsCollector.RecordBytesSent(frameMemory.Length);
+                    metricsCollector.RecordAdaptiveQualityLevel(actualQuality);
+                    
+                    // Update adaptive controller with performance metrics
+                    adaptiveController.RecordMetrics(
+                        encodeTimeMs: encodeStopwatch.ElapsedMilliseconds,
+                        sendTimeMs: sendStopwatch.ElapsedMilliseconds,
+                        queueDepth: 0, // Will be updated by reader status
+                        fps: metricsCollector.Metrics.ClientFps
+                    );
+
+                    metricsCollector.UpdateCpuAndMemory();
+
+                    frameCount++;
+                    if (fpsStopwatch.Elapsed.TotalSeconds >= 1.0)
+                    {
+                        double fps = frameCount / fpsStopwatch.Elapsed.TotalSeconds;
+                        metricsCollector.RecordClientFps(fps);
+                        frameCount = 0;
+                        fpsStopwatch.Restart();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error in encode/send loop: {ex.Message}");
+                    break;
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected on cancellation
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error in encode/send loop thread: {ex.Message}");
+        }
+    }
+
     public async Task CaptureAndSendScreenshot(NetworkStream stream)
     {
         // Check if we should limit concurrent sends
@@ -330,6 +632,8 @@ public class ScreenCaptureManager : IDisposable
 
     public void Dispose()
     {
+        ReleaseCachedDesktopGraphics();
+        ReleaseDoubleCaptureBuffers();
         tjCompressor?.Dispose();
         encoderParams?.Dispose();
         persistentGraphics?.Dispose();
