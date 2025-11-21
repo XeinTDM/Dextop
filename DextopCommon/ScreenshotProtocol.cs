@@ -71,4 +71,49 @@ public static class ScreenshotProtocol
         }
         return data;
     }
+
+    public static async Task<PooledBuffer> ReadBytesPooledAsync(NetworkStream stream)
+    {
+        int length = await ReadInt32Async(stream).ConfigureAwait(false);
+        IMemoryOwner<byte> owner = MemoryPool<byte>.Shared.Rent(length);
+        int totalRead = 0;
+        try
+        {
+            while (totalRead < length)
+            {
+                int read = await stream.ReadAsync(owner.Memory.Slice(totalRead, length - totalRead)).ConfigureAwait(false);
+                if (read == 0)
+                {
+                    owner.Dispose();
+                    throw new IOException("Disconnected");
+                }
+                totalRead += read;
+            }
+            return new PooledBuffer(owner, length);
+        }
+        catch
+        {
+            owner.Dispose();
+            throw;
+        }
+    }
+}
+
+public readonly struct PooledBuffer : IDisposable
+{
+    private readonly IMemoryOwner<byte> owner;
+    public readonly int Length;
+
+    public PooledBuffer(IMemoryOwner<byte> owner, int length)
+    {
+        this.owner = owner;
+        Length = length;
+    }
+
+    public Memory<byte> Memory => owner.Memory.Slice(0, Length);
+
+    public void Dispose()
+    {
+        owner.Dispose();
+    }
 }

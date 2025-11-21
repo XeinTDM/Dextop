@@ -1,26 +1,33 @@
 using System.Diagnostics;
 using System.Net.Sockets;
 using System.Net;
+using System.Threading.Channels;
+using DextopCommon;
 
 namespace DextopServer.Services;
 
 public class RemoteDesktopService : IDisposable
 {
     private readonly CancellationTokenSource cancellationTokenSource;
-    private readonly Action<byte[]> onScreenshotReceived;
+    private readonly Channel<PooledBuffer> frameChannel;
     private readonly TcpListener server;
     private NetworkStream? stream;
     private TcpClient? client;
     private int jpegQuality;
     private bool disposed;
 
-    public RemoteDesktopService(Action<byte[]> onScreenshotReceived, int quality)
+    public Channel<PooledBuffer> FrameChannel => frameChannel;
+
+    public RemoteDesktopService(int quality)
     {
-        this.onScreenshotReceived = onScreenshotReceived;
         jpegQuality = quality;
         server = new TcpListener(IPAddress.Any, 4782);
         server.Start();
         cancellationTokenSource = new CancellationTokenSource();
+        frameChannel = Channel.CreateBounded<PooledBuffer>(new BoundedChannelOptions(3)
+        {
+            FullMode = BoundedChannelFullMode.DropOldest
+        });
         _ = AcceptClientAsync();
     }
 
@@ -67,8 +74,8 @@ public class RemoteDesktopService : IDisposable
 
             try
             {
-                byte[] imageData = await DextopCommon.ScreenshotProtocol.ReadBytesAsync(stream).ConfigureAwait(false);
-                onScreenshotReceived?.Invoke(imageData);
+                PooledBuffer buffer = await ScreenshotProtocol.ReadBytesPooledAsync(stream).ConfigureAwait(false);
+                await frameChannel.Writer.WriteAsync(buffer, cancellationTokenSource.Token).ConfigureAwait(false);
             }
             catch
             {
@@ -92,6 +99,7 @@ public class RemoteDesktopService : IDisposable
             if (disposing)
             {
                 cancellationTokenSource.Cancel();
+                frameChannel.Writer.Complete();
                 stream?.Dispose();
                 client?.Dispose();
                 server.Stop();
