@@ -6,7 +6,9 @@ namespace DextopClient;
 
 class Program
 {
-    private static readonly ScreenCaptureManager screenCaptureManager = new();
+    // Enable TurboJPEG by default for SIMD-accelerated encoding
+    // Set to false to use managed encoder if TurboJPEG is unavailable on older systems
+    private static readonly ScreenCaptureManager screenCaptureManager = new(useTurboJpeg: true);
     private const string ServerAddress = "localhost";
     private const int ServerPort = 4782;
 

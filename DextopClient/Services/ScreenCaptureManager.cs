@@ -6,10 +6,11 @@ using System.IO;
 using System.Net.Sockets;
 using System.Diagnostics;
 using DextopCommon;
+using TurboJpegWrapper;
 
 namespace DextopClient.Services;
 
-public class ScreenCaptureManager
+public class ScreenCaptureManager : IDisposable
 {
     private readonly MemoryStream memoryStream = new();
     private static ImageCodecInfo? jpegEncoder;
@@ -25,15 +26,42 @@ public class ScreenCaptureManager
     private readonly MetricsCollector metricsCollector = new();
     private readonly AdaptiveBitrateController adaptiveController = new();
     private readonly SemaphoreSlim sendSemaphore = new(3, 3); // Limit concurrent sends
+    private TJCompressor? tjCompressor;
+    private readonly bool useTurboJpeg;
+    private bool turboJpegAvailable;
 
     [DllImport("gdi32.dll")]
     private static extern bool BitBlt(IntPtr hdcDest, int nXDest, int nYDest, int nWidth, int nHeight,
                                        IntPtr hdcSrc, int nXSrc, int nYSrc, int dwRop);
 
-    public ScreenCaptureManager()
+    public ScreenCaptureManager(bool useTurboJpeg = true)
     {
+        this.useTurboJpeg = useTurboJpeg;
         SelectedMonitorIndex = 0;
         UpdateEncoderParams();
+        InitializeTurboJpeg();
+    }
+
+    private void InitializeTurboJpeg()
+    {
+        if (!useTurboJpeg)
+        {
+            turboJpegAvailable = false;
+            Console.WriteLine("TurboJPEG disabled by configuration, using managed encoder");
+            return;
+        }
+
+        try
+        {
+            tjCompressor = new TJCompressor();
+            turboJpegAvailable = true;
+            Console.WriteLine("TurboJPEG encoder initialized successfully");
+        }
+        catch (Exception ex)
+        {
+            turboJpegAvailable = false;
+            Console.WriteLine($"TurboJPEG initialization failed, falling back to managed encoder: {ex.Message}");
+        }
     }
 
     public MetricsCollector MetricsCollector => metricsCollector;
@@ -157,6 +185,39 @@ public class ScreenCaptureManager
         }
     }
 
+    private byte[] EncodeBitmapWithTurboJpeg(Bitmap bitmap, int quality)
+    {
+        BitmapData? bitmapData = null;
+        try
+        {
+            // Lock the bitmap to access raw pixel data
+            bitmapData = bitmap.LockBits(
+                new Rectangle(0, 0, bitmap.Width, bitmap.Height),
+                ImageLockMode.ReadOnly,
+                PixelFormat.Format32bppArgb);
+
+            // TurboJPEG expects BGRA format for 32bpp bitmaps
+            byte[] compressedData = tjCompressor!.Compress(
+                bitmapData.Scan0,
+                bitmapData.Stride,
+                bitmap.Width,
+                bitmap.Height,
+                TurboJpegWrapper.TJPixelFormats.TJPF_BGRA,
+                TurboJpegWrapper.TJSubsamplingOptions.TJSAMP_420,
+                quality,
+                TurboJpegWrapper.TJFlags.BOTTOMUP);
+
+            return compressedData;
+        }
+        finally
+        {
+            if (bitmapData != null)
+            {
+                bitmap.UnlockBits(bitmapData);
+            }
+        }
+    }
+
     public async Task SendScreenshotAsync(NetworkStream stream, Bitmap screenshot, int quality)
     {
         if (currentQuality != quality)
@@ -197,15 +258,27 @@ public class ScreenCaptureManager
                 UpdateQuality(actualQuality);
             }
 
-            memoryStream.SetLength(0);
-            jpegEncoder ??= GetJpegEncoder();
-
+            byte[] frameData;
             Stopwatch encodeStopwatch = Stopwatch.StartNew();
-            bitmapToSend.Save(memoryStream, jpegEncoder, encoderParams);
+            
+            if (turboJpegAvailable && tjCompressor != null)
+            {
+                // Use TurboJPEG SIMD-accelerated encoding
+                frameData = EncodeBitmapWithTurboJpeg(bitmapToSend, actualQuality);
+            }
+            else
+            {
+                // Fallback to managed encoder
+                memoryStream.SetLength(0);
+                jpegEncoder ??= GetJpegEncoder();
+                bitmapToSend.Save(memoryStream, jpegEncoder, encoderParams);
+                frameData = memoryStream.GetBuffer()[0..(int)memoryStream.Length];
+            }
+            
             encodeStopwatch.Stop();
             metricsCollector.RecordEncodeTime(encodeStopwatch.ElapsedMilliseconds);
 
-            ReadOnlyMemory<byte> frame = new ReadOnlyMemory<byte>(memoryStream.GetBuffer(), 0, (int)memoryStream.Length);
+            ReadOnlyMemory<byte> frame = new ReadOnlyMemory<byte>(frameData);
             
             // Compute hash for duplicate detection
             byte[] frameHash = ScreenshotProtocol.ComputeFrameHash(frame);
@@ -253,5 +326,18 @@ public class ScreenCaptureManager
         {
             sendSemaphore.Release();
         }
+    }
+
+    public void Dispose()
+    {
+        tjCompressor?.Dispose();
+        encoderParams?.Dispose();
+        persistentGraphics?.Dispose();
+        persistentScreenshot?.Dispose();
+        scaledGraphics?.Dispose();
+        scaledBitmap?.Dispose();
+        memoryStream.Dispose();
+        sendSemaphore.Dispose();
+        GC.SuppressFinalize(this);
     }
 }
