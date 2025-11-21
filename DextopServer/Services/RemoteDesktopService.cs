@@ -21,14 +21,21 @@ public class RemoteDesktopService : IDisposable
     public RemoteDesktopService(int quality)
     {
         jpegQuality = quality;
-        server = new TcpListener(IPAddress.Any, 4782);
-        server.Start();
+        server = CreateDualModeListener(4782);
         cancellationTokenSource = new CancellationTokenSource();
         frameChannel = Channel.CreateBounded<(ScreenshotProtocol.FrameMetadata, PooledBuffer)>(new BoundedChannelOptions(3)
         {
             FullMode = BoundedChannelFullMode.DropOldest
         });
         _ = AcceptClientAsync();
+    }
+
+    private static TcpListener CreateDualModeListener(int port)
+    {
+        var tcpListener = new TcpListener(IPAddress.IPv6Any, port);
+        tcpListener.Server.DualMode = true; // Accept both IPv4 and IPv6 clients
+        tcpListener.Start();
+        return tcpListener;
     }
 
     public void UpdateQuality(int quality) => jpegQuality = quality;
@@ -89,8 +96,12 @@ public class RemoteDesktopService : IDisposable
                     var dummyMetadata = new ScreenshotProtocol.FrameMetadata(
                         sequenceId: 0,
                         timestamp: DateTime.UtcNow.Ticks,
-                        width: 0,
-                        height: 0,
+                        baseWidth: 0,
+                        baseHeight: 0,
+                        regionX: 0,
+                        regionY: 0,
+                        regionWidth: 0,
+                        regionHeight: 0,
                         quality: (byte)jpegQuality
                     );
                     

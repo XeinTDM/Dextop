@@ -9,9 +9,11 @@ public class RemoteDesktopUIManager : IDisposable
     private readonly Stopwatch averageStopwatch;
     private int frameCount = 0;
     private int totalFrameCount = 0;
+    private double currentInstantFps = 0;
     private double currentAverageFps = 0;
     private readonly double averageUpdateInterval;
     private readonly MetricsCollector metricsCollector;
+    private bool hasPendingFpsUpdate;
 
     public RemoteDesktopUIManager(double averageIntervalSeconds = 5.0, MetricsCollector? metricsCollector = null)
     {
@@ -25,19 +27,18 @@ public class RemoteDesktopUIManager : IDisposable
 
     public MetricsCollector MetricsCollector => metricsCollector;
 
-    public string? Update()
+    public void RecordFrame()
     {
         frameCount++;
         totalFrameCount++;
 
-        string? instantFpsText = null;
         if (instantStopwatch.Elapsed.TotalSeconds >= 0.5)
         {
-            double fps = frameCount / instantStopwatch.Elapsed.TotalSeconds;
-            instantFpsText = $"FPS: {fps:F2}";
-            metricsCollector.RecordServerFps(fps);
+            currentInstantFps = frameCount / instantStopwatch.Elapsed.TotalSeconds;
+            metricsCollector.RecordServerFps(currentInstantFps);
             frameCount = 0;
             instantStopwatch.Restart();
+            hasPendingFpsUpdate = true;
         }
 
         if (averageStopwatch.Elapsed.TotalSeconds >= averageUpdateInterval)
@@ -47,14 +48,17 @@ public class RemoteDesktopUIManager : IDisposable
             totalFrameCount = 0;
             averageStopwatch.Restart();
         }
+    }
 
+    public string? Update()
+    {
         metricsCollector.UpdateCpuAndMemory();
 
-        if (instantFpsText != null)
-        {
-            return $"{instantFpsText}  (Avg: {currentAverageFps:F2})";
-        }
-        return null;
+        if (!hasPendingFpsUpdate)
+            return null;
+
+        hasPendingFpsUpdate = false;
+        return $"FPS: {currentInstantFps:F2}  (Avg: {currentAverageFps:F2})";
     }
 
     public void RecordBytesReceived(long bytes)

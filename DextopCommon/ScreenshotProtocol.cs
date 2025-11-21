@@ -8,39 +8,74 @@ namespace DextopCommon;
 
 public static class ScreenshotProtocol
 {
-    public const byte PROTOCOL_VERSION = 1;
-    public const int METADATA_SIZE = 25; // version(1) + sequenceId(4) + timestamp(8) + width(2) + height(2) + quality(1) + hash(16)
+    public const byte LEGACY_PROTOCOL_VERSION = 1;
+    public const byte CURRENT_PROTOCOL_VERSION = 2;
+    public const int LEGACY_METADATA_SIZE = 34; // version(1) + sequenceId(4) + timestamp(8) + width(2) + height(2) + quality(1) + hash(16)
+    public const int CURRENT_METADATA_SIZE = 46; // version(1) + sequenceId(4) + timestamp(8) + baseWidth(2) + baseHeight(2) + regionX(4) + regionY(4) + regionWidth(2) + regionHeight(2) + quality(1) + hash(16)
 
     public struct FrameMetadata
     {
         public byte Version;
         public uint SequenceId;
         public long Timestamp;
-        public ushort Width;
-        public ushort Height;
+        public ushort BaseWidth;
+        public ushort BaseHeight;
+        public int RegionX;
+        public int RegionY;
+        public ushort RegionWidth;
+        public ushort RegionHeight;
         public byte Quality;
         public byte[] Hash; // MD5 hash of frame content for duplicate detection
 
-        public FrameMetadata(uint sequenceId, long timestamp, ushort width, ushort height, byte quality, byte[]? hash = null)
+        public FrameMetadata(uint sequenceId, long timestamp, ushort baseWidth, ushort baseHeight,
+            int regionX, int regionY, ushort regionWidth, ushort regionHeight, byte quality, byte[]? hash = null,
+            byte version = CURRENT_PROTOCOL_VERSION)
         {
-            Version = PROTOCOL_VERSION;
+            Version = version;
             SequenceId = sequenceId;
             Timestamp = timestamp;
-            Width = width;
-            Height = height;
+            BaseWidth = baseWidth;
+            BaseHeight = baseHeight;
+            RegionX = regionX;
+            RegionY = regionY;
+            RegionWidth = regionWidth;
+            RegionHeight = regionHeight;
             Quality = quality;
             Hash = hash ?? new byte[16];
         }
+
+        public static FrameMetadata CreateLegacy(uint sequenceId, long timestamp, ushort width, ushort height, byte quality, byte[]? hash = null)
+        {
+            return new FrameMetadata
+            {
+                Version = LEGACY_PROTOCOL_VERSION,
+                SequenceId = sequenceId,
+                Timestamp = timestamp,
+                BaseWidth = width,
+                BaseHeight = height,
+                RegionX = 0,
+                RegionY = 0,
+                RegionWidth = width,
+                RegionHeight = height,
+                Quality = quality,
+                Hash = hash ?? new byte[16]
+            };
+        }
     }
+
+    private static int GetMetadataSize(byte version) =>
+        version == LEGACY_PROTOCOL_VERSION ? LEGACY_METADATA_SIZE : CURRENT_METADATA_SIZE;
 
     public static async Task WriteFrameWithMetadataAsync(NetworkStream stream, FrameMetadata metadata, ReadOnlyMemory<byte> frameData)
     {
+        int metadataSize = GetMetadataSize(metadata.Version);
+
         // Write total size (metadata + frame data)
-        int totalSize = METADATA_SIZE + frameData.Length;
+        int totalSize = metadataSize + frameData.Length;
         await WriteInt32Async(stream, totalSize).ConfigureAwait(false);
 
         // Write metadata
-        byte[] metadataBytes = ArrayPool<byte>.Shared.Rent(METADATA_SIZE);
+        byte[] metadataBytes = ArrayPool<byte>.Shared.Rent(metadataSize);
         try
         {
             int offset = 0;
@@ -49,14 +84,34 @@ public static class ScreenshotProtocol
             offset += 4;
             BinaryPrimitives.WriteInt64LittleEndian(metadataBytes.AsSpan(offset, 8), metadata.Timestamp);
             offset += 8;
-            BinaryPrimitives.WriteUInt16LittleEndian(metadataBytes.AsSpan(offset, 2), metadata.Width);
-            offset += 2;
-            BinaryPrimitives.WriteUInt16LittleEndian(metadataBytes.AsSpan(offset, 2), metadata.Height);
-            offset += 2;
+
+            if (metadata.Version == LEGACY_PROTOCOL_VERSION)
+            {
+                BinaryPrimitives.WriteUInt16LittleEndian(metadataBytes.AsSpan(offset, 2), metadata.RegionWidth);
+                offset += 2;
+                BinaryPrimitives.WriteUInt16LittleEndian(metadataBytes.AsSpan(offset, 2), metadata.RegionHeight);
+                offset += 2;
+            }
+            else
+            {
+                BinaryPrimitives.WriteUInt16LittleEndian(metadataBytes.AsSpan(offset, 2), metadata.BaseWidth);
+                offset += 2;
+                BinaryPrimitives.WriteUInt16LittleEndian(metadataBytes.AsSpan(offset, 2), metadata.BaseHeight);
+                offset += 2;
+                BinaryPrimitives.WriteInt32LittleEndian(metadataBytes.AsSpan(offset, 4), metadata.RegionX);
+                offset += 4;
+                BinaryPrimitives.WriteInt32LittleEndian(metadataBytes.AsSpan(offset, 4), metadata.RegionY);
+                offset += 4;
+                BinaryPrimitives.WriteUInt16LittleEndian(metadataBytes.AsSpan(offset, 2), metadata.RegionWidth);
+                offset += 2;
+                BinaryPrimitives.WriteUInt16LittleEndian(metadataBytes.AsSpan(offset, 2), metadata.RegionHeight);
+                offset += 2;
+            }
+
             metadataBytes[offset++] = metadata.Quality;
             Buffer.BlockCopy(metadata.Hash, 0, metadataBytes, offset, 16);
 
-            await stream.WriteAsync(metadataBytes.AsMemory(0, METADATA_SIZE)).ConfigureAwait(false);
+            await stream.WriteAsync(metadataBytes.AsMemory(0, metadataSize)).ConfigureAwait(false);
         }
         finally
         {
@@ -94,20 +149,57 @@ public static class ScreenshotProtocol
             offset += 4;
             long timestamp = BinaryPrimitives.ReadInt64LittleEndian(memory.Span.Slice(offset, 8));
             offset += 8;
-            ushort width = BinaryPrimitives.ReadUInt16LittleEndian(memory.Span.Slice(offset, 2));
-            offset += 2;
-            ushort height = BinaryPrimitives.ReadUInt16LittleEndian(memory.Span.Slice(offset, 2));
-            offset += 2;
-            byte quality = memory.Span[offset++];
-            byte[] hash = new byte[16];
-            memory.Span.Slice(offset, 16).CopyTo(hash);
 
-            var metadata = new FrameMetadata(sequenceId, timestamp, width, height, quality, hash);
+            FrameMetadata metadata;
+            if (version == LEGACY_PROTOCOL_VERSION)
+            {
+                ushort width = BinaryPrimitives.ReadUInt16LittleEndian(memory.Span.Slice(offset, 2));
+                offset += 2;
+                ushort height = BinaryPrimitives.ReadUInt16LittleEndian(memory.Span.Slice(offset, 2));
+                offset += 2;
+                byte quality = memory.Span[offset++];
+                byte[] hash = new byte[16];
+                memory.Span.Slice(offset, 16).CopyTo(hash);
+
+                metadata = FrameMetadata.CreateLegacy(sequenceId, timestamp, width, height, quality, hash);
+            }
+            else
+            {
+                ushort baseWidth = BinaryPrimitives.ReadUInt16LittleEndian(memory.Span.Slice(offset, 2));
+                offset += 2;
+                ushort baseHeight = BinaryPrimitives.ReadUInt16LittleEndian(memory.Span.Slice(offset, 2));
+                offset += 2;
+                int regionX = BinaryPrimitives.ReadInt32LittleEndian(memory.Span.Slice(offset, 4));
+                offset += 4;
+                int regionY = BinaryPrimitives.ReadInt32LittleEndian(memory.Span.Slice(offset, 4));
+                offset += 4;
+                ushort regionWidth = BinaryPrimitives.ReadUInt16LittleEndian(memory.Span.Slice(offset, 2));
+                offset += 2;
+                ushort regionHeight = BinaryPrimitives.ReadUInt16LittleEndian(memory.Span.Slice(offset, 2));
+                offset += 2;
+                byte quality = memory.Span[offset++];
+                byte[] hash = new byte[16];
+                memory.Span.Slice(offset, 16).CopyTo(hash);
+
+                metadata = new FrameMetadata(
+                    sequenceId,
+                    timestamp,
+                    baseWidth,
+                    baseHeight,
+                    regionX,
+                    regionY,
+                    regionWidth,
+                    regionHeight,
+                    quality,
+                    hash,
+                    version);
+            }
             
             // Create pooled buffer for frame data (everything after metadata)
-            int frameDataSize = totalSize - METADATA_SIZE;
+            int metadataSize = GetMetadataSize(version);
+            int frameDataSize = Math.Max(0, totalSize - metadataSize);
             IMemoryOwner<byte> frameOwner = MemoryPool<byte>.Shared.Rent(frameDataSize);
-            owner.Memory.Slice(METADATA_SIZE, frameDataSize).CopyTo(frameOwner.Memory);
+            owner.Memory.Slice(metadataSize, frameDataSize).CopyTo(frameOwner.Memory);
             
             owner.Dispose(); // Return the original buffer
             return (metadata, new PooledBuffer(frameOwner, frameDataSize));
@@ -240,8 +332,8 @@ public static class ScreenshotProtocol
             
             // If total size is reasonable for a frame with metadata, assume it's new format
             // This is a heuristic - in practice, we'd need version negotiation
-            // For now, we assume frames > METADATA_SIZE are new format
-            return totalSize > METADATA_SIZE && totalSize < 50 * 1024 * 1024; // Reasonable upper bound
+            // For now, we assume frames larger than the legacy metadata block are framed
+            return totalSize > LEGACY_METADATA_SIZE && totalSize < 50 * 1024 * 1024; // Reasonable upper bound
         }
         finally
         {

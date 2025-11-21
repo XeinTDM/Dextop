@@ -13,9 +13,16 @@ public class RemoteKeyboardService : IDisposable
 
     public RemoteKeyboardService(int port = 4784)
     {
-        listener = new TcpListener(IPAddress.Any, port);
-        listener.Start();
+        listener = CreateDualModeListener(port);
         _ = AcceptClientAsync();
+    }
+
+    private static TcpListener CreateDualModeListener(int port)
+    {
+        var tcpListener = new TcpListener(IPAddress.IPv6Any, port);
+        tcpListener.Server.DualMode = true;
+        tcpListener.Start();
+        return tcpListener;
     }
 
     private async Task AcceptClientAsync()

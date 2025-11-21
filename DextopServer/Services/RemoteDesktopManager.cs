@@ -20,7 +20,6 @@ public class RemoteDesktopManager : IDisposable
     private WriteableBitmap? writeableBitmap;
     private int bitmapWidth;
     private int bitmapHeight;
-    private byte[]? pixelBuffer;
     private readonly object bitmapLock = new object();
     private TJDecompressor? tjDecompressor;
     private readonly bool useTurboJpeg;
@@ -215,10 +214,10 @@ public class RemoteDesktopManager : IDisposable
                     rdUIManager?.RecordBytesReceived(buffer.Length);
                     
                     // Update UI with current quality and resolution
-                    if (metadata.Width > 0 && metadata.Height > 0)
+                    if (metadata.BaseWidth > 0 && metadata.BaseHeight > 0)
                     {
                         rdUIManager?.UpdateCurrentQuality(metadata.Quality);
-                        rdUIManager?.UpdateCurrentResolution(metadata.Width, metadata.Height);
+                        rdUIManager?.UpdateCurrentResolution(metadata.BaseWidth, metadata.BaseHeight);
                     }
                 }
                 finally
@@ -243,62 +242,92 @@ public class RemoteDesktopManager : IDisposable
 
     private void ProcessFrame(ScreenshotProtocol.FrameMetadata metadata, PooledBuffer buffer)
     {
-        BitmapSource decodedBitmap = DecodeJpeg(buffer.Memory);
-        
-        lock (bitmapLock)
+        BitmapSource patchBitmap = DecodeJpeg(buffer.Memory);
+        int patchWidth = patchBitmap.PixelWidth;
+        int patchHeight = patchBitmap.PixelHeight;
+        int bitsPerPixel = patchBitmap.Format.BitsPerPixel;
+        int patchStride = (patchWidth * bitsPerPixel + 7) / 8;
+        byte[] patchPixels = new byte[patchStride * patchHeight];
+        patchBitmap.CopyPixels(patchPixels, patchStride, 0);
+
+        System.Windows.Application.Current.Dispatcher.BeginInvoke(() =>
         {
-            int width = decodedBitmap.PixelWidth;
-            int height = decodedBitmap.PixelHeight;
-            int stride = (width * decodedBitmap.Format.BitsPerPixel + 7) / 8;
-            int bufferSize = stride * height;
-            
-            if (writeableBitmap == null || bitmapWidth != width || bitmapHeight != height)
+            lock (bitmapLock)
             {
-                bitmapWidth = width;
-                bitmapHeight = height;
-                pixelBuffer = new byte[bufferSize];
-                
-                System.Windows.Application.Current.Dispatcher.Invoke(() =>
+                EnsureWriteableBitmap(metadata.BaseWidth, metadata.BaseHeight);
+                if (writeableBitmap == null || bitmapWidth <= 0 || bitmapHeight <= 0)
                 {
-                    writeableBitmap = new WriteableBitmap(
-                        bitmapWidth,
-                        bitmapHeight,
-                        96,
-                        96,
-                        PixelFormats.Bgr24,
-                        null);
-                });
-            }
-            else if (pixelBuffer == null || pixelBuffer.Length < bufferSize)
-            {
-                pixelBuffer = new byte[bufferSize];
-            }
-            
-            decodedBitmap.CopyPixels(pixelBuffer, stride, 0);
-            
-            byte[] pixelsToWrite = new byte[bufferSize];
-            Buffer.BlockCopy(pixelBuffer, 0, pixelsToWrite, 0, bufferSize);
-            
-            System.Windows.Application.Current.Dispatcher.BeginInvoke(() =>
-            {
+                    return;
+                }
+
+                int targetWidth = Math.Min(metadata.RegionWidth, patchWidth);
+                int targetHeight = Math.Min(metadata.RegionHeight, patchHeight);
+                if (targetWidth <= 0 || targetHeight <= 0)
+                {
+                    return;
+                }
+
+                int regionX = Math.Clamp(metadata.RegionX, 0, Math.Max(0, bitmapWidth - targetWidth));
+                int regionY = Math.Clamp(metadata.RegionY, 0, Math.Max(0, bitmapHeight - targetHeight));
+                int baseStride = (bitmapWidth * bitsPerPixel + 7) / 8;
+                int bytesPerPixel = Math.Max(1, bitsPerPixel / 8);
+                int bytesToCopy = Math.Min(patchStride, targetWidth * bytesPerPixel);
+                int rowsToCopy = Math.Min(patchHeight, targetHeight);
+                bool locked = false;
+
                 try
                 {
-                    writeableBitmap?.Lock();
-                    try
+                    writeableBitmap.Lock();
+                    locked = true;
+                    long baseAddress = writeableBitmap.BackBuffer.ToInt64();
+                    for (int row = 0; row < rowsToCopy; row++)
                     {
-                        Marshal.Copy(pixelsToWrite, 0, writeableBitmap!.BackBuffer, pixelsToWrite.Length);
-                        writeableBitmap.AddDirtyRect(new System.Windows.Int32Rect(0, 0, bitmapWidth, bitmapHeight));
+                        long rowAddress = baseAddress + ((regionY + row) * baseStride) + (regionX * bytesPerPixel);
+                        IntPtr rowPtr = new IntPtr(rowAddress);
+                        Marshal.Copy(patchPixels, row * patchStride, rowPtr, bytesToCopy);
                     }
-                    finally
-                    {
-                        writeableBitmap?.Unlock();
-                    }
+
+                    writeableBitmap.AddDirtyRect(new System.Windows.Int32Rect(regionX, regionY, targetWidth, targetHeight));
                 }
                 catch (Exception ex)
                 {
                     Console.WriteLine($"Error writing pixels: {ex.Message}");
                 }
-            });
+                finally
+                {
+                    if (locked)
+                    {
+                        writeableBitmap.Unlock();
+                    }
+                }
+            }
+
+            rdUIManager?.RecordFrame();
+        });
+
+        if (metadata.BaseWidth > 0 && metadata.BaseHeight > 0)
+        {
+            rdUIManager?.UpdateCurrentQuality(metadata.Quality);
+            rdUIManager?.UpdateCurrentResolution(metadata.BaseWidth, metadata.BaseHeight);
+        }
+    }
+
+    private void EnsureWriteableBitmap(int baseWidth, int baseHeight)
+    {
+        if (baseWidth <= 0 || baseHeight <= 0)
+            return;
+
+        if (writeableBitmap == null || bitmapWidth != baseWidth || bitmapHeight != baseHeight)
+        {
+            bitmapWidth = baseWidth;
+            bitmapHeight = baseHeight;
+            writeableBitmap = new WriteableBitmap(
+                bitmapWidth,
+                bitmapHeight,
+                96,
+                96,
+                PixelFormats.Bgr24,
+                null);
         }
     }
 
