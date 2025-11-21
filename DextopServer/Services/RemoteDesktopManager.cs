@@ -33,21 +33,28 @@ public class RemoteDesktopManager : IDisposable
 
     private async Task DecodeFramesAsync()
     {
-        ChannelReader<PooledBuffer> reader = rdService.FrameChannel.Reader;
+        ChannelReader<(ScreenshotProtocol.FrameMetadata Metadata, PooledBuffer FrameData)> reader = rdService.FrameChannel.Reader;
         
         while (!cancellationTokenSource.IsCancellationRequested)
         {
             try
             {
-                PooledBuffer buffer = await reader.ReadAsync(cancellationTokenSource.Token).ConfigureAwait(false);
+                var (metadata, buffer) = await reader.ReadAsync(cancellationTokenSource.Token).ConfigureAwait(false);
                 
                 try
                 {
                     Stopwatch decodeStopwatch = Stopwatch.StartNew();
-                    ProcessFrame(buffer);
+                    ProcessFrame(metadata, buffer);
                     decodeStopwatch.Stop();
                     rdUIManager?.RecordDecodeTime(decodeStopwatch.ElapsedMilliseconds);
                     rdUIManager?.RecordBytesReceived(buffer.Length);
+                    
+                    // Update UI with current quality and resolution
+                    if (metadata.Width > 0 && metadata.Height > 0)
+                    {
+                        rdUIManager?.UpdateCurrentQuality(metadata.Quality);
+                        rdUIManager?.UpdateCurrentResolution(metadata.Width, metadata.Height);
+                    }
                 }
                 finally
                 {
@@ -69,7 +76,7 @@ public class RemoteDesktopManager : IDisposable
         }
     }
 
-    private void ProcessFrame(PooledBuffer buffer)
+    private void ProcessFrame(ScreenshotProtocol.FrameMetadata metadata, PooledBuffer buffer)
     {
         BitmapSource decodedBitmap = DecodeJpeg(buffer.Memory);
         

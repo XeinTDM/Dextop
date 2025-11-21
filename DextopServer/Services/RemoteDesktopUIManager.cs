@@ -77,6 +77,18 @@ public class RemoteDesktopUIManager : IDisposable
         metricsCollector.RecordAdaptiveQualityLevel(level);
     }
 
+    public void UpdateCurrentQuality(byte quality)
+    {
+        metricsCollector.RecordAdaptiveQualityLevel(quality);
+    }
+
+    public void UpdateCurrentResolution(int width, int height)
+    {
+        // Store current resolution for UI display if needed
+        // For now, just log it
+        Console.WriteLine($"[Resolution] Current: {width}x{height}");
+    }
+
     public void Dispose()
     {
         instantStopwatch.Stop();
