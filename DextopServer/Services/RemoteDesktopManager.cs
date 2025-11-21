@@ -6,6 +6,7 @@ using System.Diagnostics;
 using DextopCommon;
 using System.Threading.Channels;
 using System.Runtime.InteropServices;
+using TurboJpegWrapper;
 
 namespace DextopServer.Services;
 
@@ -20,15 +21,42 @@ public class RemoteDesktopManager : IDisposable
     private int bitmapHeight;
     private byte[]? pixelBuffer;
     private readonly object bitmapLock = new object();
+    private TJDecompressor? tjDecompressor;
+    private readonly bool useTurboJpeg;
+    private bool turboJpegAvailable;
 
     public WriteableBitmap? WriteableBitmap => writeableBitmap;
 
     public RemoteDesktopManager(AppConfiguration config, RemoteDesktopUIManager? rdUIManager = null)
     {
         this.rdUIManager = rdUIManager;
+        this.useTurboJpeg = config.UseTurboJpeg;
         rdService = new RemoteDesktopService(config.JpegQuality);
         cancellationTokenSource = new CancellationTokenSource();
+        InitializeTurboJpeg();
         _ = Task.Run(() => DecodeFramesAsync(), cancellationTokenSource.Token);
+    }
+
+    private void InitializeTurboJpeg()
+    {
+        if (!useTurboJpeg)
+        {
+            turboJpegAvailable = false;
+            Console.WriteLine("TurboJPEG disabled by configuration, using managed decoder");
+            return;
+        }
+
+        try
+        {
+            tjDecompressor = new TJDecompressor();
+            turboJpegAvailable = true;
+            Console.WriteLine("TurboJPEG decoder initialized successfully");
+        }
+        catch (Exception ex)
+        {
+            turboJpegAvailable = false;
+            Console.WriteLine($"TurboJPEG initialization failed, falling back to managed decoder: {ex.Message}");
+        }
     }
 
     private async Task DecodeFramesAsync()
@@ -137,8 +165,43 @@ public class RemoteDesktopManager : IDisposable
         }
     }
 
-    private static BitmapSource DecodeJpeg(Memory<byte> buffer)
+    private BitmapSource DecodeJpeg(Memory<byte> buffer)
     {
+        if (turboJpegAvailable && tjDecompressor != null)
+        {
+            try
+            {
+                // Decompress using TurboJPEG
+                byte[] decompressedData = tjDecompressor.Decompress(
+                    buffer.ToArray(),
+                    TurboJpegWrapper.TJPixelFormats.TJPF_BGR,
+                    TurboJpegWrapper.TJFlags.BOTTOMUP,
+                    out int width,
+                    out int height,
+                    out int stride);
+
+                // Create BitmapSource from decompressed data
+                var bitmap = BitmapSource.Create(
+                    width,
+                    height,
+                    96,
+                    96,
+                    PixelFormats.Bgr24,
+                    null,
+                    decompressedData,
+                    stride);
+                
+                bitmap.Freeze();
+                return bitmap;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"TurboJPEG decode error, falling back to managed decoder: {ex.Message}");
+                turboJpegAvailable = false;
+            }
+        }
+
+        // Fallback to managed decoder
         using var ms = new MemoryStream(buffer.ToArray());
         var decoder = new JpegBitmapDecoder(ms, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
         var frame = decoder.Frames[0];
@@ -155,6 +218,7 @@ public class RemoteDesktopManager : IDisposable
             cancellationTokenSource.Cancel();
             rdService.Dispose();
             cancellationTokenSource.Dispose();
+            tjDecompressor?.Dispose();
             disposed = true;
             GC.SuppressFinalize(this);
         }
