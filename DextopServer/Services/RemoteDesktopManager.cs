@@ -8,6 +8,7 @@ using System.Threading.Channels;
 using System.Runtime.InteropServices;
 using System.Reflection;
 using TurboJpegWrapper;
+using System.Buffers;
 
 namespace DextopServer.Services;
 
@@ -247,62 +248,70 @@ public class RemoteDesktopManager : IDisposable
         int patchHeight = patchBitmap.PixelHeight;
         int bitsPerPixel = patchBitmap.Format.BitsPerPixel;
         int patchStride = (patchWidth * bitsPerPixel + 7) / 8;
-        byte[] patchPixels = new byte[patchStride * patchHeight];
+        int patchByteCount = patchStride * patchHeight;
+        byte[] patchPixels = ArrayPool<byte>.Shared.Rent(patchByteCount);
         patchBitmap.CopyPixels(patchPixels, patchStride, 0);
 
         System.Windows.Application.Current.Dispatcher.BeginInvoke(() =>
         {
-            lock (bitmapLock)
+            try
             {
-                EnsureWriteableBitmap(metadata.BaseWidth, metadata.BaseHeight);
-                if (writeableBitmap == null || bitmapWidth <= 0 || bitmapHeight <= 0)
+                lock (bitmapLock)
                 {
-                    return;
-                }
-
-                int targetWidth = Math.Min(metadata.RegionWidth, patchWidth);
-                int targetHeight = Math.Min(metadata.RegionHeight, patchHeight);
-                if (targetWidth <= 0 || targetHeight <= 0)
-                {
-                    return;
-                }
-
-                int regionX = Math.Clamp(metadata.RegionX, 0, Math.Max(0, bitmapWidth - targetWidth));
-                int regionY = Math.Clamp(metadata.RegionY, 0, Math.Max(0, bitmapHeight - targetHeight));
-                int baseStride = (bitmapWidth * bitsPerPixel + 7) / 8;
-                int bytesPerPixel = Math.Max(1, bitsPerPixel / 8);
-                int bytesToCopy = Math.Min(patchStride, targetWidth * bytesPerPixel);
-                int rowsToCopy = Math.Min(patchHeight, targetHeight);
-                bool locked = false;
-
-                try
-                {
-                    writeableBitmap.Lock();
-                    locked = true;
-                    long baseAddress = writeableBitmap.BackBuffer.ToInt64();
-                    for (int row = 0; row < rowsToCopy; row++)
+                    EnsureWriteableBitmap(metadata.BaseWidth, metadata.BaseHeight);
+                    if (writeableBitmap == null || bitmapWidth <= 0 || bitmapHeight <= 0)
                     {
-                        long rowAddress = baseAddress + ((regionY + row) * baseStride) + (regionX * bytesPerPixel);
-                        IntPtr rowPtr = new IntPtr(rowAddress);
-                        Marshal.Copy(patchPixels, row * patchStride, rowPtr, bytesToCopy);
+                        return;
                     }
 
-                    writeableBitmap.AddDirtyRect(new System.Windows.Int32Rect(regionX, regionY, targetWidth, targetHeight));
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"Error writing pixels: {ex.Message}");
-                }
-                finally
-                {
-                    if (locked)
+                    int targetWidth = Math.Min(metadata.RegionWidth, patchWidth);
+                    int targetHeight = Math.Min(metadata.RegionHeight, patchHeight);
+                    if (targetWidth <= 0 || targetHeight <= 0)
                     {
-                        writeableBitmap.Unlock();
+                        return;
+                    }
+
+                    int regionX = Math.Clamp(metadata.RegionX, 0, Math.Max(0, bitmapWidth - targetWidth));
+                    int regionY = Math.Clamp(metadata.RegionY, 0, Math.Max(0, bitmapHeight - targetHeight));
+                    int baseStride = (bitmapWidth * bitsPerPixel + 7) / 8;
+                    int bytesPerPixel = Math.Max(1, bitsPerPixel / 8);
+                    int bytesToCopy = Math.Min(patchStride, targetWidth * bytesPerPixel);
+                    int rowsToCopy = Math.Min(patchHeight, targetHeight);
+                    bool locked = false;
+
+                    try
+                    {
+                        writeableBitmap.Lock();
+                        locked = true;
+                        long baseAddress = writeableBitmap.BackBuffer.ToInt64();
+                        for (int row = 0; row < rowsToCopy; row++)
+                        {
+                            long rowAddress = baseAddress + ((regionY + row) * baseStride) + (regionX * bytesPerPixel);
+                            IntPtr rowPtr = new IntPtr(rowAddress);
+                            Marshal.Copy(patchPixels, row * patchStride, rowPtr, bytesToCopy);
+                        }
+
+                        writeableBitmap.AddDirtyRect(new System.Windows.Int32Rect(regionX, regionY, targetWidth, targetHeight));
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Error writing pixels: {ex.Message}");
+                    }
+                    finally
+                    {
+                        if (locked)
+                        {
+                            writeableBitmap.Unlock();
+                        }
                     }
                 }
+
+                rdUIManager?.RecordFrame();
             }
-
-            rdUIManager?.RecordFrame();
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(patchPixels);
+            }
         });
 
         if (metadata.BaseWidth > 0 && metadata.BaseHeight > 0)

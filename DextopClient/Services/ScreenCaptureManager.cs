@@ -37,8 +37,11 @@ public class ScreenCaptureManager : IDisposable
     private DesktopDuplicator? desktopDuplicator;
     private int captureQueueDepth;
     private bool hasSentInitialFullFrame;
-    private const int DirtyTileSize = 256;
-    private const int MaxTilesPerFrame = 16;
+    private const int DirtyTileSize = 512;
+    private const int MaxTilesPerFrame = 32;
+    private int monitorChangeRequested;
+    private int restartRequested;
+    private int captureGeneration;
 
     // Double-buffered capture pipeline
     private Bitmap? captureBuffer1;
@@ -58,6 +61,7 @@ public class ScreenCaptureManager : IDisposable
         public long CaptureTimeMs;
         public Rectangle[] DirtyRectangles;
         public bool OwnsBitmap;
+        public int Generation;
     }
 
     [DllImport("gdi32.dll")]
@@ -79,6 +83,7 @@ public class ScreenCaptureManager : IDisposable
     {
         this.useTurboJpeg = useTurboJpeg;
         SelectedMonitorIndex = 0;
+        captureGeneration = 1;
         UpdateEncoderParams();
         InitializeTurboJpeg();
         if (useDesktopDuplication)
@@ -87,6 +92,7 @@ public class ScreenCaptureManager : IDisposable
             {
                 desktopDuplicator = new DesktopDuplicator();
                 Console.WriteLine("Desktop Duplication capture initialized.");
+                captureGeneration = 1;
             }
             catch (Exception ex)
             {
@@ -251,10 +257,12 @@ public class ScreenCaptureManager : IDisposable
         get => selectedMonitorIndex;
         set
         {
-            if (selectedMonitorIndex != value)
+            int clamped = Math.Clamp(value, 0, Math.Max(0, Screen.AllScreens.Length - 1));
+            if (selectedMonitorIndex != clamped)
             {
-                selectedMonitorIndex = value;
-                UpdateScreenBounds();
+                selectedMonitorIndex = clamped;
+                Interlocked.Exchange(ref monitorChangeRequested, 1);
+                Interlocked.Exchange(ref restartRequested, 1);
             }
         }
     }
@@ -422,7 +430,102 @@ public class ScreenCaptureManager : IDisposable
         }
     }
 
-    private byte[] EncodeRegion(Bitmap source, Rectangle region, int quality)
+    private static void ConfigureGraphics(Graphics graphics)
+    {
+        graphics.CompositingMode = System.Drawing.Drawing2D.CompositingMode.SourceCopy;
+        graphics.CompositingQuality = System.Drawing.Drawing2D.CompositingQuality.HighSpeed;
+        graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighSpeed;
+        graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.Low;
+    }
+
+    private void HandleMonitorChange()
+    {
+        Console.WriteLine($"Monitor changed to index {selectedMonitorIndex}, reinitializing capture pipeline.");
+        ReleaseCachedDesktopGraphics();
+
+        Bitmap? oldBuffer1;
+        Bitmap? oldBuffer2;
+        Graphics? oldGraphics1;
+        Graphics? oldGraphics2;
+
+        lock (captureLock)
+        {
+            var screens = Screen.AllScreens;
+            int safeIndex = Math.Clamp(selectedMonitorIndex, 0, screens.Length - 1);
+            var screen = screens[safeIndex];
+            screenBounds = screen.Bounds;
+            if (screenBounds.Width <= 0 || screenBounds.Height <= 0)
+            {
+                Console.WriteLine("Monitor change aborted: target screen has invalid bounds.");
+                return;
+            }
+
+            oldBuffer1 = captureBuffer1;
+            oldBuffer2 = captureBuffer2;
+            oldGraphics1 = captureGraphics1;
+            oldGraphics2 = captureGraphics2;
+
+            persistentGraphics?.Dispose();
+            persistentScreenshot?.Dispose();
+            persistentScreenshot = new Bitmap(screenBounds.Width, screenBounds.Height, PixelFormat.Format32bppArgb);
+            persistentGraphics = Graphics.FromImage(persistentScreenshot);
+            ConfigureGraphics(persistentGraphics);
+
+            scaledGraphics?.Dispose();
+            scaledBitmap?.Dispose();
+            scaledGraphics = null;
+            scaledBitmap = null;
+
+            // Allocate fresh double buffers sized to the new monitor
+            captureBuffer1 = new Bitmap(screenBounds.Width, screenBounds.Height, PixelFormat.Format32bppArgb);
+            captureGraphics1 = Graphics.FromImage(captureBuffer1);
+            ConfigureGraphics(captureGraphics1);
+
+            captureBuffer2 = new Bitmap(screenBounds.Width, screenBounds.Height, PixelFormat.Format32bppArgb);
+            captureGraphics2 = Graphics.FromImage(captureBuffer2);
+            ConfigureGraphics(captureGraphics2);
+
+            currentCaptureBuffer = captureBuffer1;
+            currentCaptureGraphics = captureGraphics1;
+            captureQueueDepth = 0;
+        }
+
+        // Dispose old buffers after a short delay to avoid races with in-flight encodes
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(1000).ConfigureAwait(false);
+            oldGraphics1?.Dispose();
+            oldBuffer1?.Dispose();
+            oldGraphics2?.Dispose();
+            oldBuffer2?.Dispose();
+        });
+
+        hasSentInitialFullFrame = false;
+        adaptiveController.Reset();
+        RecreateDesktopDuplicator();
+
+        // Force capture/send loops to exit so the outer connection restarts cleanly
+        Interlocked.Exchange(ref restartRequested, 1);
+        Interlocked.Increment(ref captureGeneration);
+    }
+
+    private void RecreateDesktopDuplicator()
+    {
+        desktopDuplicator?.Dispose();
+        desktopDuplicator = null;
+        try
+        {
+            desktopDuplicator = new DesktopDuplicator(outputIndex: selectedMonitorIndex);
+            Console.WriteLine($"Desktop Duplication capture initialized for monitor {selectedMonitorIndex}.");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Desktop Duplication initialization failed for monitor {selectedMonitorIndex}, falling back to BitBlt: {ex.Message}");
+            desktopDuplicator = null;
+        }
+    }
+
+    private byte[] EncodeRegionManaged(Bitmap source, Rectangle region, int quality)
     {
         Rectangle clampedRegion = Rectangle.Intersect(new Rectangle(0, 0, source.Width, source.Height), region);
         if (clampedRegion.Width <= 0 || clampedRegion.Height <= 0)
@@ -431,17 +534,78 @@ public class ScreenCaptureManager : IDisposable
         }
 
         using Bitmap patchBitmap = source.Clone(clampedRegion, PixelFormat.Format32bppArgb);
-        if (turboJpegAvailable && tjCompressor != null)
-        {
-            return EncodeBitmapWithTurboJpeg(patchBitmap, quality);
-        }
-
         memoryStream.SetLength(0);
         jpegEncoder ??= GetJpegEncoder();
         patchBitmap.Save(memoryStream, jpegEncoder, encoderParams);
         byte[] buffer = new byte[(int)memoryStream.Length];
         Buffer.BlockCopy(memoryStream.GetBuffer(), 0, buffer, 0, buffer.Length);
         return buffer;
+    }
+
+    private List<TilePayload> EncodeTiles(Bitmap source, List<Rectangle> regions, int quality)
+    {
+        if (regions.Count == 0)
+        {
+            return new List<TilePayload>();
+        }
+
+        if (turboJpegAvailable && tjCompressor != null)
+        {
+            BitmapData? bitmapData = null;
+            try
+            {
+                bitmapData = source.LockBits(
+                    new Rectangle(0, 0, source.Width, source.Height),
+                    ImageLockMode.ReadOnly,
+                    PixelFormat.Format32bppArgb);
+
+                List<TilePayload> payloads = new List<TilePayload>(regions.Count);
+                foreach (var region in regions)
+                {
+                    Rectangle clamped = Rectangle.Intersect(new Rectangle(0, 0, source.Width, source.Height), region);
+                    if (clamped.Width <= 0 || clamped.Height <= 0)
+                    {
+                        continue;
+                    }
+
+                    IntPtr regionPtr = bitmapData.Scan0 + (clamped.Y * bitmapData.Stride) + (clamped.X * 4);
+                    byte[] compressedData = tjCompressor.Compress(
+                        regionPtr,
+                        bitmapData.Stride,
+                        clamped.Width,
+                        clamped.Height,
+                        TurboJpegWrapper.TJPixelFormats.TJPF_BGRA,
+                        TurboJpegWrapper.TJSubsamplingOptions.TJSAMP_420,
+                        quality,
+                        TurboJpegWrapper.TJFlags.BOTTOMUP);
+
+                    payloads.Add(new TilePayload(clamped, compressedData));
+                }
+
+                return payloads;
+            }
+            finally
+            {
+                if (bitmapData != null)
+                {
+                    source.UnlockBits(bitmapData);
+                }
+            }
+        }
+
+        List<TilePayload> managedPayloads = new List<TilePayload>(regions.Count);
+        foreach (var region in regions)
+        {
+            Rectangle clamped = Rectangle.Intersect(new Rectangle(0, 0, source.Width, source.Height), region);
+            if (clamped.Width <= 0 || clamped.Height <= 0)
+            {
+                continue;
+            }
+
+            managedPayloads.Add(new TilePayload(clamped, EncodeRegionManaged(source, clamped, quality)));
+        }
+
+        return managedPayloads;
     }
 
     private List<Rectangle> BuildDirtyTiles(Rectangle[] dirtyRects, int originalWidth, int originalHeight, int scaledWidth, int scaledHeight)
@@ -565,11 +729,13 @@ public class ScreenCaptureManager : IDisposable
         await DextopCommon.ScreenshotProtocol.WriteBytesAsync(stream, frame).ConfigureAwait(false);
     }
 
-public async Task StartStreamingAsync(NetworkStream stream, CancellationToken ct, int targetFps = 60)
-{
-    InitializeDoubleCaptureBuffers();
-    captureQueueDepth = 0;
-    hasSentInitialFullFrame = false;
+    public async Task StartStreamingAsync(NetworkStream stream, CancellationToken ct, int targetFps = 60)
+    {
+        Interlocked.Exchange(ref restartRequested, 0);
+        Interlocked.Exchange(ref monitorChangeRequested, 0);
+        InitializeDoubleCaptureBuffers();
+        captureQueueDepth = 0;
+        hasSentInitialFullFrame = false;
     
     try
     {
@@ -671,6 +837,17 @@ public async Task StartStreamingAsync(NetworkStream stream, CancellationToken ct
 
         while (!ct.IsCancellationRequested)
         {
+            if (Interlocked.CompareExchange(ref monitorChangeRequested, 0, 1) == 1)
+            {
+                HandleMonitorChange();
+                nextFrameTime = Stopwatch.GetTimestamp();
+            }
+
+            if (Interlocked.CompareExchange(ref restartRequested, 0, 1) == 1)
+            {
+                break;
+            }
+
             long now = Stopwatch.GetTimestamp();
             long ticksUntilNextFrame = nextFrameTime - now;
 
@@ -709,13 +886,23 @@ public async Task StartStreamingAsync(NetworkStream stream, CancellationToken ct
             captureStopwatch.Stop();
             metricsCollector.RecordCaptureTime(captureStopwatch.ElapsedMilliseconds);
 
+            // Clone to avoid GDI/GPU "object in use" errors when encode thread reads while capture thread writes.
+            Bitmap frameBitmap = (Bitmap)bufferToFill.Clone();
             var frame = new CapturedFrame
             {
-                Bitmap = bufferToFill,
+                Bitmap = frameBitmap,
                 CaptureTimeMs = captureStopwatch.ElapsedMilliseconds,
                 DirtyRectangles = new[] { new Rectangle(0, 0, bufferToFill.Width, bufferToFill.Height) },
-                OwnsBitmap = false
+                OwnsBitmap = true,
+                Generation = Volatile.Read(ref captureGeneration)
             };
+
+            // If encoder is backed up, drop this capture to avoid overwriting buffers mid-encode
+            if (Interlocked.CompareExchange(ref captureQueueDepth, 0, 0) >= 3)
+            {
+                frameBitmap.Dispose();
+                continue;
+            }
 
             if (writer.TryWrite(frame))
             {
@@ -724,6 +911,7 @@ public async Task StartStreamingAsync(NetworkStream stream, CancellationToken ct
             else
             {
                 metricsCollector.RecordDroppedFrame();
+                frameBitmap.Dispose();
             }
 
             nextFrameTime += ticksPerFrame;
@@ -732,7 +920,8 @@ public async Task StartStreamingAsync(NetworkStream stream, CancellationToken ct
 
     private void RunDesktopDuplicationCaptureLoop(ChannelWriter<CapturedFrame> writer, CancellationToken ct, int targetFps)
     {
-        if (desktopDuplicator == null)
+        var duplicator = desktopDuplicator;
+        if (duplicator == null)
         {
             return;
         }
@@ -745,6 +934,25 @@ public async Task StartStreamingAsync(NetworkStream stream, CancellationToken ct
 
         while (!ct.IsCancellationRequested)
         {
+            if (Interlocked.CompareExchange(ref monitorChangeRequested, 0, 1) == 1)
+            {
+                HandleMonitorChange();
+                duplicator = desktopDuplicator;
+                if (duplicator == null)
+                {
+                    RunLegacyCaptureLoop(writer, ct, targetFps);
+                    return;
+                }
+                ticksPerFrame = 10_000_000 / Math.Max(1, targetFps);
+                nextFrameTime = Stopwatch.GetTimestamp();
+                consecutiveFailures = 0;
+            }
+
+            if (Interlocked.CompareExchange(ref restartRequested, 0, 1) == 1)
+            {
+                break;
+            }
+
             long now = Stopwatch.GetTimestamp();
             long ticksUntilNextFrame = nextFrameTime - now;
 
@@ -758,17 +966,22 @@ public async Task StartStreamingAsync(NetworkStream stream, CancellationToken ct
             }
 
             Stopwatch captureStopwatch = Stopwatch.StartNew();
-            if (!desktopDuplicator.TryCaptureFrame(out Bitmap? capturedBitmap, out Rectangle[] dirtyRects))
+            bool timedOut;
+            if (!duplicator.TryCaptureFrame(out Bitmap? capturedBitmap, out Rectangle[] dirtyRects, out timedOut))
             {
-                consecutiveFailures++;
-                if (consecutiveFailures >= maxFailuresBeforeFallback)
+                if (!timedOut)
                 {
-                    Console.WriteLine("Desktop Duplication capture failing, falling back to legacy BitBlt.");
-                    desktopDuplicator.Dispose();
-                    desktopDuplicator = null;
-                    RunLegacyCaptureLoop(writer, ct, targetFps);
-                    return;
+                    consecutiveFailures++;
+                    if (consecutiveFailures >= maxFailuresBeforeFallback)
+                    {
+                        Console.WriteLine("Desktop Duplication capture failing, falling back to legacy BitBlt.");
+                        duplicator.Dispose();
+                        desktopDuplicator = null;
+                        RunLegacyCaptureLoop(writer, ct, targetFps);
+                        return;
+                    }
                 }
+                captureStopwatch.Stop();
                 nextFrameTime += ticksPerFrame;
                 continue;
             }
@@ -784,9 +997,16 @@ public async Task StartStreamingAsync(NetworkStream stream, CancellationToken ct
                 CaptureTimeMs = captureStopwatch.ElapsedMilliseconds,
                 DirtyRectangles = dirtyRects.Length > 0
                     ? dirtyRects
-                    : new[] { new Rectangle(0, 0, desktopDuplicator.Width, desktopDuplicator.Height) },
-                OwnsBitmap = true
+                    : new[] { new Rectangle(0, 0, frameBitmap.Width, frameBitmap.Height) },
+                OwnsBitmap = true,
+                Generation = Volatile.Read(ref captureGeneration)
             };
+
+            if (Interlocked.CompareExchange(ref captureQueueDepth, 0, 0) >= 3)
+            {
+                frameBitmap.Dispose();
+                continue;
+            }
 
             if (!writer.TryWrite(frame))
             {
@@ -811,10 +1031,38 @@ public async Task StartStreamingAsync(NetworkStream stream, CancellationToken ct
         {
             await foreach (var frame in reader.ReadAllAsync(ct))
             {
+                if (Interlocked.CompareExchange(ref restartRequested, 0, 1) == 1)
+                {
+                    break;
+                }
+
                 int queueDepthSnapshot = Math.Max(0, Interlocked.Decrement(ref captureQueueDepth));
                 try
                 {
-                    Bitmap bitmapToSend = GetScaledBitmap(frame.Bitmap);
+                    int expectedGeneration = Volatile.Read(ref captureGeneration);
+                    if (frame.Generation != expectedGeneration)
+                    {
+                        if (frame.OwnsBitmap)
+                        {
+                            frame.Bitmap.Dispose();
+                        }
+                        continue;
+                    }
+
+                    Bitmap bitmapToSend;
+                    try
+                    {
+                        if (frame.Bitmap.Width <= 0 || frame.Bitmap.Height <= 0)
+                        {
+                            continue;
+                        }
+                        bitmapToSend = GetScaledBitmap(frame.Bitmap);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Skipping frame due to bitmap error: {ex.Message}");
+                        continue;
+                    }
                     int scaledWidth = bitmapToSend.Width;
                     int scaledHeight = bitmapToSend.Height;
                     int actualQuality = adaptiveController.CurrentQuality;
@@ -850,10 +1098,11 @@ public async Task StartStreamingAsync(NetworkStream stream, CancellationToken ct
                     bool sentFullFrameThisCycle = !hasSentInitialFullFrame || tileRects.Count == 1 && tileRects[0].Width == scaledWidth && tileRects[0].Height == scaledHeight;
 
                     Stopwatch encodeStopwatch = Stopwatch.StartNew();
-                    List<TilePayload> tilePayloads = new List<TilePayload>(tileRects.Count);
-                    foreach (var rect in tileRects)
+                    List<TilePayload> tilePayloads = EncodeTiles(bitmapToSend, tileRects, actualQuality);
+                    if (tilePayloads.Count == 0)
                     {
-                        tilePayloads.Add(new TilePayload(rect, EncodeRegion(bitmapToSend, rect, actualQuality)));
+                        frameCount++;
+                        continue;
                     }
                     encodeStopwatch.Stop();
                     metricsCollector.RecordEncodeTime(encodeStopwatch.ElapsedMilliseconds);
@@ -868,10 +1117,11 @@ public async Task StartStreamingAsync(NetworkStream stream, CancellationToken ct
 
                     long totalBytesSent = 0;
                     Stopwatch sendStopwatch = Stopwatch.StartNew();
+                    uint frameSequenceId = adaptiveController.NextSequenceId;
                     foreach (var payload in tilePayloads)
                     {
                         var metadata = new ScreenshotProtocol.FrameMetadata(
-                            sequenceId: adaptiveController.NextSequenceId,
+                            sequenceId: frameSequenceId,
                             timestamp: DateTime.UtcNow.Ticks,
                             baseWidth: (ushort)Math.Min(scaledWidth, ushort.MaxValue),
                             baseHeight: (ushort)Math.Min(scaledHeight, ushort.MaxValue),
@@ -954,12 +1204,15 @@ public async Task StartStreamingAsync(NetworkStream stream, CancellationToken ct
         try
         {
             Stopwatch captureStopwatch = Stopwatch.StartNew();
-            if (desktopDuplicator != null && desktopDuplicator.TryCaptureFrame(out var capturedBitmap, out _))
+            if (desktopDuplicator != null && desktopDuplicator.TryCaptureFrame(out var capturedBitmap, out _, out bool timedOut))
             {
-                sourceBitmap = capturedBitmap ?? throw new InvalidOperationException("Desktop duplicator returned an empty bitmap.");
-                ownsCapturedBitmap = true;
+                if (!timedOut && capturedBitmap != null)
+                {
+                    sourceBitmap = capturedBitmap;
+                    ownsCapturedBitmap = true;
+                }
             }
-            else
+            if (sourceBitmap == null)
             {
                 CaptureIntoPersistentBitmap();
                 sourceBitmap = persistentScreenshot!;

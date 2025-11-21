@@ -13,17 +13,27 @@ namespace DextopClient.Services;
 public sealed class DesktopDuplicator : IDisposable
 {
     private const int DxgiErrorWaitTimeout = unchecked((int)0x887A0006);
-    private readonly ID3D11Device device;
-    private readonly ID3D11DeviceContext context;
-    private readonly IDXGIOutputDuplication duplication;
-    private readonly ID3D11Texture2D stagingTexture;
+    private ID3D11Device device;
+    private ID3D11DeviceContext context;
+    private IDXGIOutputDuplication duplication;
+    private ID3D11Texture2D stagingTexture;
+    private readonly int adapterIndex;
+    private readonly int outputIndex;
     private readonly object captureLock = new();
     private bool disposed;
+    private int invalidArgCount;
 
-    public int Width { get; }
-    public int Height { get; }
+    public int Width { get; private set; }
+    public int Height { get; private set; }
 
     public DesktopDuplicator(int adapterIndex = 0, int outputIndex = 0)
+    {
+        this.adapterIndex = adapterIndex;
+        this.outputIndex = outputIndex;
+        (device, context, duplication, stagingTexture, Width, Height) = CreateDuplication(adapterIndex, outputIndex);
+    }
+
+    private static (ID3D11Device device, ID3D11DeviceContext context, IDXGIOutputDuplication duplication, ID3D11Texture2D staging, int width, int height) CreateDuplication(int adapterIndex, int outputIndex)
     {
         var featureLevels = new[]
         {
@@ -43,8 +53,7 @@ public sealed class DesktopDuplicator : IDisposable
             immediateContext: out ID3D11DeviceContext context);
 
         creationResult.CheckError();
-        this.device = device;
-        this.context = context;
+        
 
         using IDXGIFactory1 factory = DXGI.CreateDXGIFactory1<IDXGIFactory1>();
         Result adapterResult = factory.EnumAdapters1((uint)adapterIndex, out IDXGIAdapter1 adapter);
@@ -54,16 +63,16 @@ public sealed class DesktopDuplicator : IDisposable
         Result outputResult = adapter1.EnumOutputs((uint)outputIndex, out IDXGIOutput output);
         outputResult.CheckError();
         RawRect desktopBounds = output.Description.DesktopCoordinates;
-        Width = desktopBounds.Right - desktopBounds.Left;
-        Height = desktopBounds.Bottom - desktopBounds.Top;
+        int width = desktopBounds.Right - desktopBounds.Left;
+        int height = desktopBounds.Bottom - desktopBounds.Top;
 
         using IDXGIOutput1 output1 = output.QueryInterface<IDXGIOutput1>();
-        duplication = output1.DuplicateOutput(this.device);
+        IDXGIOutputDuplication duplication = output1.DuplicateOutput(device);
 
         var textureDesc = new Texture2DDescription
         {
-            Width = (uint)Width,
-            Height = (uint)Height,
+            Width = (uint)width,
+            Height = (uint)height,
             MipLevels = 1,
             ArraySize = 1,
             Format = Format.B8G8R8A8_UNorm,
@@ -74,13 +83,15 @@ public sealed class DesktopDuplicator : IDisposable
             MiscFlags = ResourceOptionFlags.None
         };
 
-        stagingTexture = this.device.CreateTexture2D(textureDesc) ?? throw new InvalidOperationException("Failed to create staging texture.");
+        ID3D11Texture2D stagingTexture = device.CreateTexture2D(textureDesc) ?? throw new InvalidOperationException("Failed to create staging texture.");
+        return (device, context, duplication, stagingTexture, width, height);
     }
 
-    public bool TryCaptureFrame(out Bitmap? bitmap, out Rectangle[] dirtyRectangles, int timeoutMs = 33)
+    public bool TryCaptureFrame(out Bitmap? bitmap, out Rectangle[] dirtyRectangles, out bool timedOut, int timeoutMs = 33)
     {
         bitmap = null;
         dirtyRectangles = Array.Empty<Rectangle>();
+        timedOut = false;
 
         lock (captureLock)
         {
@@ -92,6 +103,7 @@ public sealed class DesktopDuplicator : IDisposable
                 Result result = duplication.AcquireNextFrame((uint)timeoutMs, out OutduplFrameInfo _, out desktopResource);
                 if (result.Code == DxgiErrorWaitTimeout)
                 {
+                    timedOut = true;
                     return false;
                 }
 
@@ -114,8 +126,22 @@ public sealed class DesktopDuplicator : IDisposable
                 dirtyRectangles = GetDirtyRectangles();
                 return true;
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                if (IsInvalidArg(ex))
+                {
+                    int hits = Interlocked.Increment(ref invalidArgCount);
+                    if (hits <= 3)
+                    {
+                        RecreateDuplicationLocked();
+                        return false;
+                    }
+
+                    Console.WriteLine("DesktopDuplication invalid-argument persisted after retries; disabling duplication.");
+                    throw;
+                }
+
+                Console.WriteLine($"DesktopDuplication error: {ex.Message}");
                 return false;
             }
             finally
@@ -208,5 +234,31 @@ public sealed class DesktopDuplicator : IDisposable
             device.Dispose();
             disposed = true;
         }
+    }
+
+    private static bool IsInvalidArg(Exception ex)
+    {
+        const int E_INVALIDARG = unchecked((int)0x80070057);
+        return ex.HResult == E_INVALIDARG;
+    }
+
+    private void RecreateDuplicationLocked()
+    {
+        try
+        {
+            stagingTexture?.Dispose();
+            duplication?.Dispose();
+            context?.Dispose();
+            device?.Dispose();
+        }
+        catch
+        {
+            // ignore cleanup errors
+        }
+
+        (device, context, duplication, stagingTexture, int width, int height) = CreateDuplication(adapterIndex, outputIndex);
+        Width = width;
+        Height = height;
+        invalidArgCount = 0;
     }
 }

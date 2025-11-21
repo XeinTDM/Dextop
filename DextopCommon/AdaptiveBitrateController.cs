@@ -153,8 +153,6 @@ public class AdaptiveBitrateController
             if (adjusted)
             {
                 lastQualityAdjustment = DateTime.UtcNow;
-                Console.WriteLine($"[AdaptiveBitrate] Adjusted: Quality={currentQuality}, Scale={currentScaleFactor:F2}, " +
-                                $"FPS={avgFps:F1}, Queue={avgQueueDepth:F1}, Encode={avgEncodeTime:F1}ms");
             }
         }
     }
