@@ -7,6 +7,7 @@ using System.Net.Sockets;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Channels;
+using System.Reflection;
 using DextopCommon;
 using TurboJpegWrapper;
 
@@ -54,6 +55,17 @@ public class ScreenCaptureManager : IDisposable
     private static extern bool BitBlt(IntPtr hdcDest, int nXDest, int nYDest, int nWidth, int nHeight,
                                        IntPtr hdcSrc, int nXSrc, int nYSrc, int dwRop);
 
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetDllDirectory(string lpPathName);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool AddDllDirectory(string NewDirectory);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr LoadLibrary(string lpFileName);
+
     public ScreenCaptureManager(bool useTurboJpeg = true)
     {
         this.useTurboJpeg = useTurboJpeg;
@@ -73,6 +85,8 @@ public class ScreenCaptureManager : IDisposable
 
         try
         {
+            SetupDllSearchPaths();
+            VerifyTurboJpegAvailability();
             tjCompressor = new TJCompressor();
             turboJpegAvailable = true;
             Console.WriteLine("TurboJPEG encoder initialized successfully");
@@ -81,6 +95,129 @@ public class ScreenCaptureManager : IDisposable
         {
             turboJpegAvailable = false;
             Console.WriteLine($"TurboJPEG initialization failed, falling back to managed encoder: {ex.Message}");
+        }
+    }
+
+    private void VerifyTurboJpegAvailability()
+    {
+        try
+        {
+            string? assemblyLocation = Assembly.GetExecutingAssembly().Location;
+            if (string.IsNullOrEmpty(assemblyLocation))
+            {
+                Console.WriteLine("Warning: Could not determine assembly location for verification");
+                return;
+            }
+
+            string assemblyDir = Path.GetDirectoryName(assemblyLocation)!;
+            string platformDir = Environment.Is64BitProcess ? "x64" : "x86";
+            string dllPath = Path.Combine(assemblyDir, platformDir);
+            string turboJpegPath = Path.Combine(dllPath, "turbojpeg.dll");
+
+            Console.WriteLine($"Process architecture: {(Environment.Is64BitProcess ? "x64" : "x86")}");
+            Console.WriteLine($"Looking for TurboJPEG DLL at: {turboJpegPath}");
+            
+            if (File.Exists(turboJpegPath))
+            {
+                var fileInfo = new FileInfo(turboJpegPath);
+                Console.WriteLine($"TurboJPEG DLL found: {fileInfo.Length} bytes, modified: {fileInfo.LastWriteTime}");
+            }
+            else
+            {
+                Console.WriteLine($"ERROR: TurboJPEG DLL not found at {turboJpegPath}");
+                
+                // List all files in the directory to help with debugging
+                if (Directory.Exists(dllPath))
+                {
+                    var files = Directory.GetFiles(dllPath);
+                    Console.WriteLine($"Files in {dllPath}:");
+                    foreach (var file in files)
+                    {
+                        Console.WriteLine($"  - {Path.GetFileName(file)}");
+                    }
+                }
+                else
+                {
+                    Console.WriteLine($"Directory {dllPath} does not exist");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error during TurboJPEG verification: {ex.Message}");
+        }
+    }
+
+    private void SetupDllSearchPaths()
+    {
+        try
+        {
+            string? assemblyLocation = Assembly.GetExecutingAssembly().Location;
+            if (string.IsNullOrEmpty(assemblyLocation))
+            {
+                Console.WriteLine("Warning: Could not determine assembly location");
+                return;
+            }
+
+            string assemblyDir = Path.GetDirectoryName(assemblyLocation)!;
+            string platformDir = Environment.Is64BitProcess ? "x64" : "x86";
+            string dllPath = Path.Combine(assemblyDir, platformDir);
+
+            if (Directory.Exists(dllPath))
+            {
+                Console.WriteLine($"Adding DLL search path: {dllPath}");
+                
+                // Add the platform-specific directory to DLL search paths
+                int error;
+                if (!AddDllDirectory(dllPath))
+                {
+                    error = (int)Marshal.GetLastWin32Error();
+                    Console.WriteLine($"Warning: AddDllDirectory failed with error code: {error}");
+                    
+                    // Fallback: try SetDllDirectory (older method)
+                    if (!SetDllDirectory(dllPath))
+                    {
+                        error = (int)Marshal.GetLastWin32Error();
+                        Console.WriteLine($"Warning: SetDllDirectory failed with error code: {error}");
+                    }
+                    else
+                    {
+                        Console.WriteLine("SetDllDirectory succeeded as fallback");
+                    }
+                }
+                else
+                {
+                    Console.WriteLine("AddDllDirectory succeeded");
+                }
+
+                // Try to pre-load the DLL to verify it works
+                string turboJpegPath = Path.Combine(dllPath, "turbojpeg.dll");
+                if (File.Exists(turboJpegPath))
+                {
+                    IntPtr handle = LoadLibrary(turboJpegPath);
+                    if (handle != IntPtr.Zero)
+                    {
+                        Console.WriteLine("TurboJPEG DLL pre-loaded successfully");
+                    }
+                    else
+                    {
+                        error = (int)Marshal.GetLastWin32Error();
+                        Console.WriteLine($"Warning: Failed to pre-load turbojpeg.dll, error code: {error}");
+                    }
+                }
+                else
+                {
+                    Console.WriteLine($"Warning: turbojpeg.dll not found at {turboJpegPath}");
+                }
+            }
+            else
+            {
+                Console.WriteLine($"Warning: Platform-specific DLL directory not found: {dllPath}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Warning: Failed to setup DLL search paths: {ex.Message}");
         }
     }
 
